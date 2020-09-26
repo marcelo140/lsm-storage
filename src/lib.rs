@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::path::{PathBuf, Path};
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Write, Read};
+
+use anyhow::Result;
 
 struct SSTable {
     path: PathBuf,
@@ -9,6 +11,20 @@ struct SSTable {
 
 struct MemTable {
     tree: BTreeMap<String, Vec<u8>>,
+}
+
+impl SSTable {
+    pub fn get(&self, key: &str) -> Option<Vec<u8>> {
+        let mut file = File::open(&self.path).unwrap();
+        let mut contents = Vec::new();
+
+        file.read_to_end(&mut contents).unwrap();
+        let contents: Vec<(String, Vec<u8>)> = bincode::deserialize(&contents).unwrap();
+
+        contents.iter()
+            .find(|(k, _)| *k == key).cloned()
+            .map(|(_, v)| v)
+    }
 }
 
 impl MemTable {
@@ -24,15 +40,14 @@ impl MemTable {
         self.tree.len()
     }
 
-    fn persist(self, path: &Path) -> SSTable {
-        let mut fd = File::create(&path).unwrap();
+    fn persist(self, path: &Path) -> Result<SSTable> {
+        let mut fd = File::create(&path)?;
 
-        for kv in self.tree {
-            let serialized_kv = bincode::serialize(&kv).unwrap();
-            fd.write_all(&serialized_kv).unwrap();
-        }
+        let kvs: Vec<(String, Vec<u8>)> = self.tree.into_iter().collect();
+        let serialized_kv = bincode::serialize(&kvs).unwrap();
+        fd.write_all(&serialized_kv)?;
 
-        SSTable { path: path.to_path_buf() }
+        Ok(SSTable { path: path.to_path_buf() })
     }
 }
 
@@ -70,20 +85,20 @@ impl EngineBuilder {
         self
     }
 
-    pub fn build(self) -> Engine {
+    pub fn build(self) -> Result<Engine> {
         let mut seq_logs = 0;
         let mut sstables = Vec::new();
 
-        std::fs::create_dir_all(&self.config.segments_path).unwrap();
+        std::fs::create_dir_all(&self.config.segments_path)?;
 
         // TODO: a sstable may be corrupted due to a crash while being written. Fix this later.
-        for entry in std::fs::read_dir(&self.config.segments_path).unwrap() {
-            let path = entry.unwrap().path();
+        for entry in std::fs::read_dir(&self.config.segments_path)? {
+            let path = entry?.path();
             let filename = path.file_name().unwrap().to_str().unwrap();
 
             if filename.starts_with(&self.config.segments_name) {
                 let id = filename.rsplit('-').next().unwrap();
-                let id: usize = id.parse().unwrap();
+                let id: usize = id.parse()?;
 
                 sstables.push((id, SSTable { path }));
                 seq_logs += 1;
@@ -93,7 +108,7 @@ impl EngineBuilder {
         sstables.sort_by_key(|t| t.0);
         let sstables = sstables.into_iter().map(|t| t.1).collect();
 
-        Engine { config: self.config, sstables, seq_logs, memtable: MemTable::new() }
+        Ok(Engine { config: self.config, sstables, seq_logs, memtable: MemTable::new() })
     }
 }
 
@@ -114,16 +129,20 @@ pub struct WriteHandler<'engine> {
     engine: &'engine mut Engine,
 }
 
+pub struct ReadHandler<'engine> {
+    engine: &'engine Engine,
+}
+
 impl Engine {
     pub fn builder() -> EngineBuilder {
         EngineBuilder::new()
     }
 
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self> {
         EngineBuilder::new().build()
     }
 
-    pub fn open_as_writer(&mut self) -> Result<WriteHandler, std::io::Error> {
+    pub fn open_as_writer(&mut self) -> Result<WriteHandler> {
         let lock = self.lock_path();
 
         OpenOptions::new()
@@ -131,6 +150,11 @@ impl Engine {
             .write(true)
             .open(&lock)
             .map(move |_| WriteHandler{ engine: self })
+            .map_err(From::from)
+    }
+
+    pub fn open_as_reader(&self) -> ReadHandler {
+        ReadHandler { engine: self }
     }
 
     fn lock_path(&self) -> PathBuf {
@@ -151,7 +175,7 @@ impl Engine {
 }
 
 impl<'engine> WriteHandler<'engine> {
-    pub fn insert(&mut self, key: String, value: Vec<u8>) {
+    pub fn insert(&mut self, key: String, value: Vec<u8>) -> Result<()> {
         self.engine.memtable.insert(key, value);
 
         // TODO: data race here, reads will get wrong results.
@@ -159,11 +183,13 @@ impl<'engine> WriteHandler<'engine> {
             let path = self.engine.segment_path(self.engine.seq_logs);
 
             let memtable = std::mem::replace(&mut self.engine.memtable, MemTable::new());
-            let sstable = memtable.persist(&path);
+            let sstable = memtable.persist(&path)?;
 
             self.engine.sstables.push(sstable);
             self.engine.seq_logs += 1;
         }
+
+        Ok(())
     }
 }
 
@@ -171,12 +197,6 @@ impl<'engine> Drop for WriteHandler<'engine> {
     fn drop(&mut self) {
         let lock = self.engine.lock_path();
         std::fs::remove_file(&lock).unwrap()
-    }
-}
-
-impl Default for Engine {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -209,15 +229,16 @@ mod tests {
         Engine::builder()
             .segments_path(path)
             .build()
+            .unwrap()
     }
 
     fn inject(engine: &mut Engine, times: usize) {
-        let value = "nice".as_bytes().to_owned();
         let mut writer = engine.open_as_writer().unwrap();
 
         for i in 0..times {
             let k = format!("key-{}", i);
-            writer.insert(k, value.clone());
+            let v = format!("value-{}", i).as_bytes().to_owned();
+            writer.insert(k, v).unwrap();
         }
     }
 
@@ -243,6 +264,20 @@ mod tests {
 
         let engine = engine_from_uuid(&uuid);
         assert_eq!(engine.sstables.len(), 2);
+
+        clean(&uuid);
+    }
+
+    #[test]
+    fn read_from_table() {
+        let (uuid, mut engine) = setup();
+
+        let times = engine.config.threshold;
+        inject(&mut engine, times);
+
+        let table = &engine.sstables[0];
+        let value = String::from_utf8(table.get("key-3").unwrap()).unwrap();
+        assert_eq!("value-3", value);
 
         clean(&uuid);
     }
