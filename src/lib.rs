@@ -1,30 +1,19 @@
+#[cfg(test)]
+mod test_utils;
+
+mod sstable;
+
 use std::collections::BTreeMap;
 use std::path::{PathBuf, Path};
 use std::fs::{File, OpenOptions};
-use std::io::{Write, Read};
+use std::io::Write;
 
 use anyhow::Result;
 
-struct SSTable {
-    path: PathBuf,
-}
+use sstable::SSTable;
 
 struct MemTable {
     tree: BTreeMap<String, Vec<u8>>,
-}
-
-impl SSTable {
-    pub fn get(&self, key: &str) -> Option<Vec<u8>> {
-        let mut file = File::open(&self.path).unwrap();
-        let mut contents = Vec::new();
-
-        file.read_to_end(&mut contents).unwrap();
-        let contents: Vec<(String, Vec<u8>)> = bincode::deserialize(&contents).unwrap();
-
-        contents.iter()
-            .find(|(k, _)| *k == key).cloned()
-            .map(|(_, v)| v)
-    }
 }
 
 impl MemTable {
@@ -47,7 +36,7 @@ impl MemTable {
         let serialized_kv = bincode::serialize(&kvs).unwrap();
         fd.write_all(&serialized_kv)?;
 
-        Ok(SSTable { path: path.to_path_buf() })
+        Ok(SSTable::new(path.to_path_buf()))
     }
 }
 
@@ -100,7 +89,7 @@ impl EngineBuilder {
                 let id = filename.rsplit('-').next().unwrap();
                 let id: usize = id.parse()?;
 
-                sstables.push((id, SSTable { path }));
+                sstables.push((id, SSTable::new(path)));
                 seq_logs += 1;
             }
         }
@@ -202,45 +191,7 @@ impl<'engine> Drop for WriteHandler<'engine> {
 
 #[cfg(test)]
 mod tests {
-    use crate::Engine;
-    use uuid::Uuid;
-    use std::path::PathBuf;
-
-    fn setup() -> (String, Engine) {
-        let uuid = Uuid::new_v4().to_hyphenated().to_string();
-        let engine = engine_from_uuid(&uuid);
-
-        (uuid, engine)
-    }
-
-    fn clean(uuid: &str) {
-        let mut path = PathBuf::new();
-        path.push(".");
-        path.push(&uuid);
-
-        std::fs::remove_dir_all(path).unwrap();
-    }
-
-    fn engine_from_uuid(uuid: &str) -> Engine {
-        let mut path = PathBuf::new();
-        path.push(".");
-        path.push(&uuid);
-
-        Engine::builder()
-            .segments_path(path)
-            .build()
-            .unwrap()
-    }
-
-    fn inject(engine: &mut Engine, times: usize) {
-        let mut writer = engine.open_as_writer().unwrap();
-
-        for i in 0..times {
-            let k = format!("key-{}", i);
-            let v = format!("value-{}", i).as_bytes().to_owned();
-            writer.insert(k, v).unwrap();
-        }
-    }
+    use crate::test_utils::*;
 
     #[test]
     fn memtable_is_fresh() {
@@ -264,20 +215,6 @@ mod tests {
 
         let engine = engine_from_uuid(&uuid);
         assert_eq!(engine.sstables.len(), 2);
-
-        clean(&uuid);
-    }
-
-    #[test]
-    fn read_from_table() {
-        let (uuid, mut engine) = setup();
-
-        let times = engine.config.threshold;
-        inject(&mut engine, times);
-
-        let table = &engine.sstables[0];
-        let value = String::from_utf8(table.get("key-3").unwrap()).unwrap();
-        assert_eq!("value-3", value);
 
         clean(&uuid);
     }
