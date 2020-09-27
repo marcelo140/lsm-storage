@@ -35,6 +35,7 @@ mod tests {
         let times = engine.config.threshold;
         inject(&mut engine, times);
 
+        let engine = engine.db.lock().unwrap();
         let table = &engine.sstables[0];
         let value = String::from_utf8(table.get("key-3").unwrap()).unwrap();
         assert_eq!("value-3", value);
