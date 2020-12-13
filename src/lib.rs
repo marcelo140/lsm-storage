@@ -9,9 +9,17 @@ use std::fs::OpenOptions;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
+use serde::{Serialize, Deserialize};
 
 use sstable::SSTable;
 use memtable::MemTable;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum Stored {
+    Tombstone,
+    Value(Vec<u8>),
+}
+
 
 /// Defines the configuration for the storage necessary to handle sstables.
 struct Config {

@@ -6,26 +6,24 @@ use std::io::Write;
 
 use anyhow::Result;
 
+use crate::Stored;
 use crate::sstable::SSTable;
 
 /// An in-memory data-structure that keeps entries ordered by key.
 ///
 /// It is hard to keep a mutable on-disk data structure ordered without losing performance. To
-/// overcome this, new entries are inserted into a in-memory table. Once the size of the table
+/// overcome this, new entries are inserted into an in-memory table. Once the size of the table
 /// exceeds a certain threshold, it is persisted as a SSTable.
 ///
 /// In order to recover from a crash without losing the in-memory data, every insertion should be
-/// inserted into a Write-Ahead Log.
+/// inserted into a Write-Ahead Log. As such, insertions and removes can fail if they are unable
+/// to persist to disk.
 ///
-// Supported:
-// - accepts new entries
-// - can be persisted into a SSTable
-// - is backed by a WAL to recover from crashes
-//
-// TODO:
-// - support delete
+/// In case of remove operations, the original key-pair may already be persisted in a persisted
+/// SSTable and thus cannot be simply removed. This is why we insert a Tombstone in remove 
+/// operations.
 pub struct MemTable {
-    tree: BTreeMap<String, Vec<u8>>,
+    tree: BTreeMap<String, Stored>,
     wal: File,
 }
 
@@ -76,8 +74,15 @@ impl MemTable {
 
     /// Inserts a new entry into the MemTable, persisting it in the WAL for recovery purposes.
     pub fn insert(&mut self, key: String, value: Vec<u8>) -> Result<()> {
-        bincode::serialize_into(&mut self.wal, &(&key, &value))?;
-        self.tree.insert(key, value);
+        bincode::serialize_into(&mut self.wal, &(&key, Stored::Value(value.clone())))?;
+        self.tree.insert(key, Stored::Value(value));
+
+        Ok(())
+    }
+
+    pub fn remove(&mut self, key: String) -> Result<()> {
+        bincode::serialize_into(&mut self.wal, &(&key, Stored::Tombstone))?;
+        self.tree.insert(key, Stored::Tombstone);
 
         Ok(())
     }
@@ -89,7 +94,10 @@ impl MemTable {
 
     /// Returns the value corresponding to the given key, if present.
     pub fn get(&self, key: &str) -> Option<Vec<u8>> {
-        self.tree.get(key).cloned()
+        match self.tree.get(key).cloned() {
+            Some(Stored::Value(v)) => Some(v),
+            _ => None,
+        }
     }
 
     /// Persists the MemTable to disk storing its entries in-order.
@@ -98,7 +106,7 @@ impl MemTable {
     pub fn persist(self, path: &Path) -> Result<SSTable> {
         let mut fd = File::create(&path)?;
 
-        let kvs: Vec<(String, Vec<u8>)> = self.tree.into_iter().collect();
+        let kvs: Vec<(String, Stored)> = self.tree.into_iter().collect();
         let serialized_kv = bincode::serialize(&kvs).unwrap();
         fd.write_all(&serialized_kv)?;
 
@@ -128,6 +136,18 @@ mod tests {
     }
 
     #[test]
+    fn memtables_deletes_are_successful() {
+        let (uuid, _path, mut memtable) = setup_memtable();
+
+        memtable.insert("key2".to_string(), "value2".as_bytes().to_owned()).unwrap();
+        memtable.remove("key2".to_string()).unwrap();
+
+        assert_eq!(memtable.get("key2"), None);
+
+        clean(&uuid);
+    }
+
+    #[test]
     fn recovering_through_wal_yields_the_same_tree() {
         let (uuid, path, mut memtable) = setup_memtable();
 
@@ -149,6 +169,7 @@ mod tests {
         memtable.insert("key2".to_string(), "value2".as_bytes().to_owned()).unwrap();
         memtable.insert("key1".to_string(), "value1".as_bytes().to_owned()).unwrap();
         memtable.insert("key3".to_string(), "value1".as_bytes().to_owned()).unwrap();
+        memtable.remove("key1".to_string()).unwrap();
 
         let mut wal_path = path.to_path_buf();
         wal_path.push("write-ahead-log");

@@ -2,6 +2,8 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::io::Read;
 
+use crate::Stored;
+
 pub struct SSTable {
     path: PathBuf,
 }
@@ -21,11 +23,16 @@ impl SSTable {
         let mut contents = Vec::new();
 
         file.read_to_end(&mut contents).unwrap();
-        let contents: Vec<(String, Vec<u8>)> = bincode::deserialize(&contents).unwrap();
+        let contents: Vec<(String, Stored)> = bincode::deserialize(&contents).unwrap();
 
-        contents.iter()
+        let value = contents.iter()
             .find(|(k, _)| *k == key).cloned()
-            .map(|(_, v)| v)
+            .map(|(_, v)| v);
+
+        match value {
+            Some(Stored::Value(v)) => Some(v),
+            _ => None,
+        }
     }
 }
 
