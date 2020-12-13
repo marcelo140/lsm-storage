@@ -13,18 +13,25 @@ use anyhow::Result;
 use sstable::SSTable;
 use memtable::MemTable;
 
+/// Defines the configuration for the storage necessary to handle sstables.
 struct Config {
+    /// The path where the segments are stored.
     segments_path: PathBuf,
+    /// The pattern for the segments name.
     segments_name: String,
+    /// The size at which a memtable is converted into a sstable.
     threshold: usize,
 }
 
+/// The storage engine. It holds the current memtable and the set of sstables
 pub struct Engine {
     seq_logs: usize,
     memtable: MemTable,
     sstables: Vec<SSTable>,
 }
 
+/// The engine and its configuration. Why isn't the configuration inside the engine itself?
+/// Maybe because it's read-only.
 pub struct Storage {
     db: Arc<Mutex<Engine>>,
     config: Arc<Config>,
@@ -34,6 +41,7 @@ pub struct StorageBuilder {
     config: Config,
 }
 
+/// Builder to create the storage.
 impl StorageBuilder {
     pub fn new() -> Self {
         let mut path = PathBuf::new();
@@ -58,6 +66,11 @@ impl StorageBuilder {
         self
     }
 
+    /// Builds the storage.
+    /// - ensures the directory where the segments will be stored exists
+    /// - builds a vector of sstables based on the files on that directory that match the segment
+    /// name
+    /// - creates an empty memtable
     pub fn build(self) -> Result<Storage> {
         let mut seq_logs = 0;
         let mut sstables = Vec::new();
@@ -84,7 +97,7 @@ impl StorageBuilder {
         let engine = Engine {
             sstables,
             seq_logs,
-            memtable: MemTable::new(),
+            memtable: MemTable::new(&self.config.segments_path),
         };
 
         Ok(Storage {
@@ -100,6 +113,7 @@ impl Default for StorageBuilder {
     }
 }
 
+/// A borrow of the storage that allows writing.
 pub struct WriteHandler<'engine> {
     engine: &'engine mut Storage,
 }
@@ -129,6 +143,8 @@ impl Storage {
         path
     }
 
+    /// Creates the lock file to avoid other engines writing concurrently and returns
+    /// a WriteHandler.
     pub fn open_as_writer(&mut self) -> Result<WriteHandler> {
         let lock = self.lock_path();
 
@@ -140,6 +156,8 @@ impl Storage {
             .map_err(From::from)
     }
 
+    /// Performs a read by trying to find the value in the memtable and falling back to the
+    /// sstables if not successful.
     pub fn read(&self, key: &str) -> Option<Vec<u8>> {
         let engine = self.db.lock().unwrap();
 
@@ -159,16 +177,21 @@ impl Storage {
 }
 
 impl<'engine> WriteHandler<'engine> {
+    /// Inserts a value into the memtable. If the memtable size reaches its threshold, converts it
+    /// into a sstable.
+    ///
+    /// ISSUES
+    /// - the memtable is swapped with an empty one before it is persisted. concurrent readers will
+    /// see the storage in a past state state.
     pub fn insert(&mut self, key: String, value: Vec<u8>) -> Result<()> {
         let mut engine = self.engine.db.lock().unwrap();
 
-        engine.memtable.insert(key, value);
+        engine.memtable.insert(key, value).unwrap();
 
-        // TODO: data race here, reads will get wrong results.
         if engine.memtable.len() == self.engine.config.threshold {
             let path = self.engine.segment_path(engine.seq_logs);
 
-            let memtable = std::mem::replace(&mut engine.memtable, MemTable::new());
+            let memtable = std::mem::replace(&mut engine.memtable, MemTable::new(&self.engine.config.segments_path));
             let sstable = memtable.persist(&path)?;
 
             engine.sstables.push(sstable);

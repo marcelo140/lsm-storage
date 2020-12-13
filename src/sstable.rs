@@ -6,11 +6,16 @@ pub struct SSTable {
     path: PathBuf,
 }
 
+/// Ordered set of <key, values> pairs stored in disk.
 impl SSTable {
     pub fn new(path: PathBuf) -> Self {
         SSTable { path }
     }
 
+    /// Gets the value for a given key, if it is stored in this SSTable.
+    ///
+    /// TODO
+    /// - optimize it. this thing is scanning the entire file for each read.
     pub fn get(&self, key: &str) -> Option<Vec<u8>> {
         let mut file = File::open(&self.path).unwrap();
         let mut contents = Vec::new();

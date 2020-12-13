@@ -1,7 +1,9 @@
-use crate::Storage;
-use uuid::Uuid;
-
+use std::fs;
 use std::path::PathBuf;
+
+use crate::Storage;
+use crate::MemTable;
+use uuid::Uuid;
 
 pub fn setup() -> (String, Storage) {
     let uuid = Uuid::new_v4().to_hyphenated().to_string();
@@ -9,6 +11,22 @@ pub fn setup() -> (String, Storage) {
 
     (uuid, engine)
 }
+
+pub fn setup_memtable() -> (String, PathBuf, MemTable) {
+    let uuid = Uuid::new_v4().to_hyphenated().to_string();
+
+    let mut path = PathBuf::new();
+    path.push(".");
+    path.push(&uuid);
+
+    fs::create_dir_all(&path).unwrap();
+
+    let memtable = MemTable::new(&path);
+
+    (uuid, path, memtable)
+}
+
+
 
 pub fn clean(uuid: &str) {
     let mut path = PathBuf::new();
