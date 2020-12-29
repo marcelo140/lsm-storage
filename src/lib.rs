@@ -100,7 +100,7 @@ impl StorageBuilder {
         }
 
         sstables.sort_by_key(|t| t.0);
-        let sstables = sstables.into_iter().map(|t| t.1).collect();
+        let sstables = sstables.into_iter().flat_map(|t| t.1).collect();
 
         let engine = Engine {
             sstables,
@@ -172,7 +172,7 @@ impl Storage {
         engine.memtable.get(key)
             .or_else(|| {
                 for table in engine.sstables.iter().rev() {
-                    let v = table.get(key);
+                    let v = table.get(key).unwrap();
 
                     if v.is_some() {
                         return v;

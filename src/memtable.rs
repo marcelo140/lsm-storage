@@ -1,10 +1,8 @@
-use std::collections::BTreeMap;
-use std::path::Path;
-use std::fs::File;
-use std::fs::OpenOptions;
-use std::io::Write;
-
 use anyhow::Result;
+
+use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
+use std::path::Path;
 
 use crate::Stored;
 use crate::sstable::SSTable;
@@ -22,6 +20,8 @@ use crate::sstable::SSTable;
 /// In case of remove operations, the original key-pair may already be persisted in a persisted
 /// SSTable and thus cannot be simply removed. This is why we insert a Tombstone in remove 
 /// operations.
+///
+/// TODO: discard WAL after persisting
 pub struct MemTable {
     tree: BTreeMap<String, Stored>,
     wal: File,
@@ -60,7 +60,6 @@ impl MemTable {
 
         while let Ok((key, value)) = bincode::deserialize_from(&wal) {
             bytes_read += bincode::serialized_size(&(&key, &value)).unwrap();
-            dbg!(bytes_read);
             tree.insert(key, value);
         }
 
@@ -107,10 +106,11 @@ impl MemTable {
         let mut fd = File::create(&path)?;
 
         let kvs: Vec<(String, Stored)> = self.tree.into_iter().collect();
-        let serialized_kv = bincode::serialize(&kvs).unwrap();
-        fd.write_all(&serialized_kv)?;
+        for (key, value) in kvs {
+            bincode::serialize_into(&mut fd, &(&key, value))?;
+        }
 
-        Ok(SSTable::new(path.to_path_buf()))
+        SSTable::new(path.to_path_buf())
     }
 }
 

@@ -1,37 +1,64 @@
-use std::fs::File;
+use anyhow::Result;
+
+use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::{Seek, SeekFrom};
 use std::path::PathBuf;
-use std::io::Read;
 
 use crate::Stored;
 
+/// A data structure that allows read-only access into an ordered set of <key, value> pairs persisted on-disk.
+///
+/// Upon initialization, all entries are read to build an index with the offset for each key. This
+/// allows for quick reads into the log by seeking directly into the correct offset.
+///
+/// Supported:
+/// - read value
+/// - in-memory index
+/// TODO:
+/// - merge
+/// - make the index sparse
 pub struct SSTable {
     path: PathBuf,
+    indexes: HashMap<String, u64>,
 }
 
-/// Ordered set of <key, values> pairs stored in disk.
 impl SSTable {
-    pub fn new(path: PathBuf) -> Self {
-        SSTable { path }
+    /// Initializes a SSTable for the provided path and scans the log to build the in-memory index.
+    pub fn new(path: PathBuf) -> Result<Self> {
+        let mut indexes = HashMap::new();
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)?;
+
+        let mut bytes_read = 0;
+
+        while let Ok((key, value)) = bincode::deserialize_from::<_, (String, Stored)>(&file) {
+            let pair_size = bincode::serialized_size(&(&key, &value)).unwrap();
+            indexes.insert(key, bytes_read);
+            bytes_read += pair_size;
+        }
+
+        Ok(SSTable { path, indexes })
     }
 
-    /// Gets the value for a given key, if it is stored in this SSTable.
-    ///
-    /// TODO
-    /// - optimize it. this thing is scanning the entire file for each read.
-    pub fn get(&self, key: &str) -> Option<Vec<u8>> {
-        let mut file = File::open(&self.path).unwrap();
-        let mut contents = Vec::new();
+    /// Returns the value for the provided key if it is stored in the SSTable.
+    pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let value_position = &self.indexes.get(key);
+        let mut file = OpenOptions::new().read(true).open(&self.path)?;
 
-        file.read_to_end(&mut contents).unwrap();
-        let contents: Vec<(String, Stored)> = bincode::deserialize(&contents).unwrap();
+        if value_position.is_none() {
+            return Ok(None);
+        }
 
-        let value = contents.iter()
-            .find(|(k, _)| *k == key).cloned()
-            .map(|(_, v)| v);
+        file.seek(SeekFrom::Start(*value_position.unwrap()))?;
+        let (_key, value) = bincode::deserialize_from::<&File, (String, Stored)>(&file).unwrap();
 
         match value {
-            Some(Stored::Value(v)) => Some(v),
-            _ => None,
+            Stored::Value(v) => Ok(Some(v)),
+            Stored::Tombstone => Ok(None),
         }
     }
 }
@@ -44,12 +71,12 @@ mod tests {
     fn read_from_table() {
         let (uuid, mut engine) = setup();
 
-        let times = engine.config.threshold;
+        let times = engine.config.threshold+1;
         inject(&mut engine, times);
 
         let engine = engine.db.lock().unwrap();
         let table = &engine.sstables[0];
-        let value = String::from_utf8(table.get("key-3").unwrap()).unwrap();
+        let value = String::from_utf8(table.get("key-3").unwrap().unwrap()).unwrap();
         assert_eq!("value-3", value);
 
         clean(&uuid);
