@@ -4,12 +4,12 @@ mod test_utils;
 mod memtable;
 mod sstable;
 
+use anyhow::Result;
+use serde::{Serialize, Deserialize};
+
 use std::path::PathBuf;
 use std::fs::OpenOptions;
 use std::sync::{Arc, Mutex};
-
-use anyhow::Result;
-use serde::{Serialize, Deserialize};
 
 use sstable::SSTable;
 use memtable::MemTable;

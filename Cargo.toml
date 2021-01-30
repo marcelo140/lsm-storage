@@ -5,6 +5,12 @@ authors = ["Marcelo Miranda <marcelo.caridade@protonmail.com>"]
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[dev-dependencies]
+criterion = "0.3"
+
+[[bench]]
+name = "benchmark"
+harness = false
 
 [dependencies]
 serde = { version = "1.0.116", features = ["derive"] }

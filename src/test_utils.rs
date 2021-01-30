@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use crate::Storage;
 use crate::MemTable;
+
 use uuid::Uuid;
 
 pub fn setup() -> (String, Storage) {
@@ -25,8 +26,6 @@ pub fn setup_memtable() -> (String, PathBuf, MemTable) {
 
     (uuid, path, memtable)
 }
-
-
 
 pub fn clean(uuid: &str) {
     let mut path = PathBuf::new();
