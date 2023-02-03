@@ -159,7 +159,7 @@ impl Storage {
         OpenOptions::new()
             .create_new(true)
             .write(true)
-            .open(&lock)
+            .open(lock)
             .map(move |_| WriteHandler{ engine: self })
             .map_err(From::from)
     }
@@ -213,7 +213,7 @@ impl<'engine> WriteHandler<'engine> {
 impl<'engine> Drop for WriteHandler<'engine> {
     fn drop(&mut self) {
         let lock = self.engine.lock_path();
-        std::fs::remove_file(&lock).unwrap()
+        std::fs::remove_file(lock).unwrap()
     }
 }
 

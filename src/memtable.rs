@@ -103,7 +103,7 @@ impl MemTable {
     ///
     /// Returns the corresponding SSTable.
     pub fn persist(self, path: &Path) -> Result<SSTable> {
-        let mut fd = File::create(&path)?;
+        let mut fd = File::create(path)?;
 
         let kvs: Vec<(String, Stored)> = self.tree.into_iter().collect();
         for (key, value) in kvs {
