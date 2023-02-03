@@ -80,27 +80,10 @@ impl StorageBuilder {
     /// name
     /// - creates an empty memtable
     pub fn build(self) -> Result<Storage> {
-        let mut seq_logs = 0;
-        let mut sstables = Vec::new();
-
         std::fs::create_dir_all(&self.config.segments_path)?;
 
-        // TODO: a sstable may be corrupted due to a crash while being written. Fix this later.
-        for entry in std::fs::read_dir(&self.config.segments_path)? {
-            let path = entry?.path();
-            let filename = path.file_name().unwrap().to_str().unwrap();
-
-            if filename.starts_with(&self.config.segments_name) {
-                let id = filename.rsplit('-').next().unwrap();
-                let id: usize = id.parse()?;
-
-                sstables.push((id, SSTable::new(path)));
-                seq_logs += 1;
-            }
-        }
-
-        sstables.sort_by_key(|t| t.0);
-        let sstables = sstables.into_iter().flat_map(|t| t.1).collect();
+        let sstables = self.find_sstables()?;
+        let seq_logs = sstables.len();
 
         let engine = Engine {
             sstables,
@@ -112,6 +95,32 @@ impl StorageBuilder {
             config: Arc::new(self.config),
             db: Arc::new(Mutex::new(engine)),
         })
+    }
+
+    // TODO: a sstable may be corrupted due to a crash while being written. Fix this later.
+    fn find_sstables(&self) -> Result<Vec<SSTable>> {
+        let mut sstables = Vec::new();
+
+        for entry in std::fs::read_dir(&self.config.segments_path)? {
+            let path = entry?.path();
+            let filename = path.file_name().unwrap().to_str().unwrap();
+
+            if filename.starts_with(&self.config.segments_name) {
+                let id = filename.rsplit('-').next().unwrap();
+                let id: usize = id.parse()?;
+
+                sstables.push((id, SSTable::new(path)));
+            }
+        }
+
+        sstables.sort_by_key(|t| t.0);
+
+        Ok(
+            sstables
+                .into_iter()
+                .flat_map(|t| t.1)
+                .collect()
+        )
     }
 }
 
