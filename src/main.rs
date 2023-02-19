@@ -6,8 +6,5 @@ fn main() {
     let mut path = PathBuf::new();
     path.push("./table/");
 
-    Storage::builder()
-        .segments_path(path)
-        .build()
-        .unwrap();
+    Storage::builder().segments_path(path).build().unwrap();
 }

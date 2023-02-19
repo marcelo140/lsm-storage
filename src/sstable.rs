@@ -3,10 +3,10 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom};
-use std::path::{PathBuf, Path};
+use std::path::{Path, PathBuf};
 
-use crate::Stored;
 use crate::memtable::MemTable;
+use crate::Stored;
 
 /// A data structure that allows read-only access into an ordered set of <key, value> pairs persisted on-disk.
 ///
@@ -22,10 +22,7 @@ impl SSTable {
     pub fn new(path: PathBuf) -> Result<Self> {
         let mut indexes = HashMap::new();
 
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)?;
+        let file = OpenOptions::new().read(true).write(true).open(&path)?;
 
         let mut bytes_read = 0;
 
@@ -79,7 +76,7 @@ mod tests {
     fn read_from_table() {
         let (uuid, mut engine) = setup();
 
-        let times = engine.config.threshold+1;
+        let times = engine.config.threshold + 1;
         inject(&mut engine, times);
 
         let engine = engine.db.lock().unwrap();

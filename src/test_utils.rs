@@ -2,8 +2,10 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 
+use crate::memtable::WAL_PATH;
 use crate::MemTable;
 use crate::Storage;
+use anyhow::Result;
 
 use uuid::Uuid;
 
@@ -21,22 +23,24 @@ impl Test {
         Test { path }
     }
 
-    pub fn create_memtable(&self) -> MemTable {
-        fs::create_dir_all(&self.path).unwrap();
+    pub fn create_memtable(&self) -> Result<MemTable> {
+        fs::create_dir_all(&self.path)?;
 
-        MemTable::new(&self.path).unwrap()
+        Ok(MemTable::new(&self.path)?)
     }
 
-    pub fn corrupt_wal(&self) {
+    pub fn corrupt_wal(&self) -> Result<()> {
         let mut wal_path = self.path.to_path_buf();
-        wal_path.push("write-ahead-log");
-        let mut wal = OpenOptions::new().append(true).open(&wal_path).unwrap();
+        wal_path.push(WAL_PATH);
+        let mut wal = OpenOptions::new().append(true).open(&wal_path)?;
 
-        bincode::serialize_into(&mut wal, &"5").unwrap();
+        bincode::serialize_into(&mut wal, &"5")?;
+        Ok(())
     }
 
-    pub fn clean(self) {
-        std::fs::remove_dir_all(self.path).unwrap();
+    pub fn clean(self) -> Result<()> {
+        std::fs::remove_dir_all(self.path)?;
+        Ok(())
     }
 }
 

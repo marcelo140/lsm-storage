@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::Stored;
 
-static WAL_PATH: &str = "write-ahead-log";
+pub static WAL_PATH: &str = "write-ahead-log";
 
 /// An in-memory data-structure that keeps entries ordered by key.
 ///
@@ -111,38 +111,36 @@ mod tests {
     use crate::memtable::MemTable;
     use crate::test_utils::*;
 
-    use anyhow::{Ok, Result};
+    use anyhow::Result;
 
     #[test]
     fn memtable_gets_and_inserts_are_successful() -> Result<()> {
         let test = Test::new();
-        let mut memtable = test.create_memtable();
+        let mut memtable = test.create_memtable()?;
 
         memtable.insert("key1".to_string(), "value1".as_bytes().to_owned())?;
 
         assert_eq!(memtable.get("key4"), None);
         assert_eq!(memtable.get("key1"), Some("value1".as_bytes()));
-        test.clean();
-        Ok(())
+        test.clean()
     }
 
     #[test]
     fn memtables_deletes_are_successful() -> Result<()> {
         let test = Test::new();
-        let mut memtable = test.create_memtable();
+        let mut memtable = test.create_memtable()?;
 
         memtable.insert("key2".to_string(), "value2".as_bytes().to_owned())?;
         memtable.remove("key2".to_string())?;
 
         assert_eq!(memtable.get("key2"), None);
-        test.clean();
-        Ok(())
+        test.clean()
     }
 
     #[test]
     fn recovering_through_wal_yields_the_same_tree() -> Result<()> {
         let test = Test::new();
-        let mut memtable = test.create_memtable();
+        let mut memtable = test.create_memtable()?;
 
         memtable.insert("key1".to_string(), "value1".as_bytes().to_owned())?;
         memtable.insert("key2".to_string(), "value2".as_bytes().to_owned())?;
@@ -150,33 +148,31 @@ mod tests {
         let recovered = MemTable::recover(&test.path)?;
 
         assert_eq!(memtable.tree, recovered.tree);
-        test.clean();
-        Ok(())
+        test.clean()
     }
 
     #[test]
     fn it_recovers_from_corrupted_wal() -> Result<()> {
         let test = Test::new();
-        let mut memtable = test.create_memtable();
+        let mut memtable = test.create_memtable()?;
 
         memtable.insert("key1".to_string(), "value1".as_bytes().to_owned())?;
         memtable.insert("key2".to_string(), "value2".as_bytes().to_owned())?;
         memtable.insert("key3".to_string(), "value1".as_bytes().to_owned())?;
         memtable.remove("key1".to_string())?;
 
-        test.corrupt_wal();
+        test.corrupt_wal()?;
 
         let recovered = MemTable::recover(&test.path)?;
         assert_eq!(memtable.tree, recovered.tree);
 
-        test.clean();
-        Ok(())
+        test.clean()
     }
 
     #[test]
     fn corrupted_log_is_truncated() -> Result<()> {
         let test = Test::new();
-        let mut memtable = test.create_memtable();
+        let mut memtable = test.create_memtable()?;
 
         memtable.insert("key2".to_string(), "value2".as_bytes().to_owned())?;
         memtable.insert("key1".to_string(), "value1".as_bytes().to_owned())?;
@@ -186,14 +182,13 @@ mod tests {
         let wal_metadata = wal.metadata()?;
         let wal_length = wal_metadata.len();
 
-        test.corrupt_wal();
+        test.corrupt_wal()?;
 
         MemTable::recover(&test.path)?;
         let wal_metadata = wal.metadata()?;
         let recovered_wal_length = wal_metadata.len();
 
         assert_eq!(wal_length, recovered_wal_length);
-        test.clean();
-        Ok(())
+        test.clean()
     }
 }

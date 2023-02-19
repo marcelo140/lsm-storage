@@ -2,8 +2,8 @@ use lsm_storage::Storage;
 
 use std::path::PathBuf;
 
-use uuid::Uuid;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use uuid::Uuid;
 
 fn storage_read_same_key(storage: &Storage, key: &str) {
     for _ in 0..3_000 {
@@ -17,10 +17,7 @@ fn setup(size: usize) -> lsm_storage::Storage {
     path.push(".");
     path.push(&uuid);
 
-    let mut storage = Storage::builder()
-        .segments_path(path)
-        .build()
-        .unwrap();
+    let mut storage = Storage::builder().segments_path(path).build().unwrap();
 
     let mut writer = storage.open_as_writer().unwrap();
 
@@ -37,10 +34,18 @@ fn setup(size: usize) -> lsm_storage::Storage {
 fn read_same_key(c: &mut Criterion) {
     let storage = setup(3_000);
 
-    c.bench_function("read same key 1", |b| b.iter(|| storage_read_same_key(&storage, black_box("key-1"))));
-    c.bench_function("read same key 1000", |b| b.iter(|| storage_read_same_key(&storage, black_box("key-1000"))));
-    c.bench_function("read same key 2000", |b| b.iter(|| storage_read_same_key(&storage, black_box("key-2000"))));
-    c.bench_function("read same key 2999", |b| b.iter(|| storage_read_same_key(&storage, black_box("key-2999"))));
+    c.bench_function("read same key 1", |b| {
+        b.iter(|| storage_read_same_key(&storage, black_box("key-1")))
+    });
+    c.bench_function("read same key 1000", |b| {
+        b.iter(|| storage_read_same_key(&storage, black_box("key-1000")))
+    });
+    c.bench_function("read same key 2000", |b| {
+        b.iter(|| storage_read_same_key(&storage, black_box("key-2000")))
+    });
+    c.bench_function("read same key 2999", |b| {
+        b.iter(|| storage_read_same_key(&storage, black_box("key-2999")))
+    });
 }
 
 fn storage_scan(engine: &Storage) {
@@ -78,19 +83,18 @@ fn bench_many_writes_few_keys(c: &mut Criterion) {
     path.push(".");
     path.push(&uuid);
 
-    let mut storage = Storage::builder()
-        .segments_path(path)
-        .build()
-        .unwrap();
+    let mut storage = Storage::builder().segments_path(path).build().unwrap();
 
-    c.bench_function("many writes few keys", |b| b.iter(|| many_writes_few_keys(&mut storage)));
+    c.bench_function("many writes few keys", |b| {
+        b.iter(|| many_writes_few_keys(&mut storage))
+    });
 }
 
 // TODO:
-// - benchmark get of deleted key. compare with get of early key.  
+// - benchmark get of deleted key. compare with get of early key.
 
 criterion_group!(
-    benches, 
+    benches,
     bench_many_writes,
     read_same_key,
     bench_storage_scan,

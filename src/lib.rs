@@ -5,21 +5,20 @@ mod memtable;
 mod sstable;
 
 use anyhow::Result;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
-use std::path::PathBuf;
 use std::fs::OpenOptions;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use sstable::SSTable;
 use memtable::MemTable;
+use sstable::SSTable;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum Stored {
     Tombstone,
     Value(Vec<u8>),
 }
-
 
 /// Defines the configuration for the storage necessary to handle sstables.
 struct Config {
@@ -115,12 +114,7 @@ impl StorageBuilder {
 
         sstables.sort_by_key(|t| t.0);
 
-        Ok(
-            sstables
-                .into_iter()
-                .flat_map(|t| t.1)
-                .collect()
-        )
+        Ok(sstables.into_iter().flat_map(|t| t.1).collect())
     }
 }
 
@@ -169,7 +163,7 @@ impl Storage {
             .create_new(true)
             .write(true)
             .open(lock)
-            .map(move |_| WriteHandler{ engine: self })
+            .map(move |_| WriteHandler { engine: self })
             .map_err(From::from)
     }
 
@@ -178,18 +172,17 @@ impl Storage {
     pub fn read(&self, key: &str) -> Option<Vec<u8>> {
         let engine = self.db.lock().unwrap();
 
-        engine.memtable.get(key).map(|v| v.to_vec())
-            .or_else(|| {
-                for table in engine.sstables.iter().rev() {
-                    let v = table.get(key).unwrap();
+        engine.memtable.get(key).map(|v| v.to_vec()).or_else(|| {
+            for table in engine.sstables.iter().rev() {
+                let v = table.get(key).unwrap();
 
-                    if v.is_some() {
-                        return v;
-                    }
+                if v.is_some() {
+                    return v;
                 }
+            }
 
-                None
-            })
+            None
+        })
     }
 }
 
@@ -208,7 +201,10 @@ impl<'engine> WriteHandler<'engine> {
         if engine.memtable.len() == self.engine.config.threshold {
             let path = self.engine.segment_path(engine.seq_logs);
 
-            let memtable = std::mem::replace(&mut engine.memtable, MemTable::new(&self.engine.config.segments_path).unwrap());
+            let memtable = std::mem::replace(
+                &mut engine.memtable,
+                MemTable::new(&self.engine.config.segments_path).unwrap(),
+            );
             let sstable = SSTable::from_memtable(memtable, &path)?;
 
             engine.sstables.push(sstable);
@@ -234,7 +230,7 @@ mod tests {
     fn memtable_is_fresh() {
         let (uuid, mut engine) = setup();
 
-        let times = engine.config.threshold*2;
+        let times = engine.config.threshold * 2;
         inject(&mut engine, times);
 
         let engine = engine.db.lock().unwrap();
@@ -249,7 +245,7 @@ mod tests {
     fn engine_recovers_sstables() {
         let (uuid, mut engine) = setup();
 
-        let times = engine.config.threshold*2;
+        let times = engine.config.threshold * 2;
         inject(&mut engine, times);
 
         let engine = engine_from_uuid(&uuid);
