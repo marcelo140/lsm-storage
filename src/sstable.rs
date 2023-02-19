@@ -1,11 +1,10 @@
 use anyhow::Result;
 
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use crate::memtable::MemTable;
 use crate::Stored;
 
 /// A data structure that allows read-only access into an ordered set of <key, value> pairs persisted on-disk.
@@ -13,53 +12,57 @@ use crate::Stored;
 /// Upon initialization, all entries are read to build an index with the offset for each key. This
 /// allows for quick reads into the log by seeking directly into the correct offset.
 pub struct SSTable {
-    path: PathBuf,
+    fd: File,
     indexes: HashMap<String, u64>,
 }
 
 impl SSTable {
     /// Initializes a SSTable for the provided path and scans the log to build the in-memory index.
     pub fn new(path: PathBuf) -> Result<Self> {
-        let mut indexes = HashMap::new();
+        let fd = File::open(path)?;
+        let indexes = SSTable::build_index_table(&fd)?;
 
-        let file = OpenOptions::new().read(true).write(true).open(&path)?;
+        Ok(SSTable { fd, indexes })
+    }
+
+    fn build_index_table(fd: &File) -> Result<HashMap<String, u64>> {
+        let mut indexes = HashMap::new();
 
         let mut bytes_read = 0;
 
-        while let Ok((key, value)) = bincode::deserialize_from::<_, (String, Stored)>(&file) {
-            let pair_size = bincode::serialized_size(&(&key, &value)).unwrap();
-            indexes.insert(key, bytes_read);
+        while let Ok(entry) = SSTable::read_entry(fd) {
+            let pair_size = SSTable::entry_size(&entry)?;
+            indexes.insert(entry.0, bytes_read);
             bytes_read += pair_size;
         }
 
-        Ok(SSTable { path, indexes })
+        Ok(indexes)
     }
 
-    /// Persists the MemTable to disk storing its entries in-order.
-    ///
-    /// Returns the corresponding SSTable.
-    pub fn from_memtable(memtable: MemTable, path: &Path) -> Result<Self> {
-        let mut fd = File::create(path)?;
+    fn read_entry<R>(reader: R) -> Result<(String, Stored)>
+    where
+        R: std::io::Read,
+    {
+        let entry = bincode::deserialize_from::<_, (String, Stored)>(reader)?;
+        Ok(entry)
+    }
 
-        let kvs: Vec<(String, Stored)> = memtable.tree.into_iter().collect();
-        for (key, value) in kvs {
-            bincode::serialize_into(&mut fd, &(&key, value))?;
-        }
-
-        SSTable::new(path.to_path_buf())
+    fn entry_size(entry: &(String, Stored)) -> Result<u64> {
+        let size = bincode::serialized_size(&entry).unwrap();
+        Ok(size)
     }
 
     /// Returns the value for the provided key if it is stored in the SSTable.
-    pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    pub fn get(&mut self, key: &str) -> Result<Option<Vec<u8>>> {
+        // TODO: this shouldn't need to be mutable
         let value_position = &self.indexes.get(key);
-        let mut file = OpenOptions::new().read(true).open(&self.path)?;
 
         if value_position.is_none() {
             return Ok(None);
         }
 
-        file.seek(SeekFrom::Start(*value_position.unwrap()))?;
-        let (_key, value) = bincode::deserialize_from::<&File, (String, Stored)>(&file).unwrap();
+        self.fd.seek(SeekFrom::Start(*value_position.unwrap()))?;
+        let (_key, value) = bincode::deserialize_from::<&File, (String, Stored)>(&self.fd)?;
 
         match value {
             Stored::Value(v) => Ok(Some(v)),
@@ -70,20 +73,38 @@ impl SSTable {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
+
     use crate::test_utils::*;
 
     #[test]
-    fn read_from_table() {
+    fn constructor_should_load_sstable_correctly() -> Result<()> {
+        Ok(())
+    }
+
+    #[test]
+    fn get_should_return_expected_value() -> Result<()> {
         let (uuid, mut engine) = setup();
 
         let times = engine.config.threshold + 1;
         inject(&mut engine, times);
 
-        let engine = engine.db.lock().unwrap();
-        let table = &engine.sstables[0];
+        let mut engine = engine.db.lock().unwrap();
+        let table = &mut engine.sstables[0];
         let value = String::from_utf8(table.get("key-3").unwrap().unwrap()).unwrap();
         assert_eq!("value-3", value);
 
         clean(&uuid);
+        Ok(())
+    }
+
+    #[test]
+    fn merging_should_keep_all_new_values() -> Result<()> {
+        Ok(())
+    }
+
+    #[test]
+    fn merging_should_keep_non_overriden_values() -> Result<()> {
+        Ok(())
     }
 }

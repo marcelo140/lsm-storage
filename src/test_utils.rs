@@ -42,6 +42,13 @@ impl Test {
         std::fs::remove_dir_all(self.path)?;
         Ok(())
     }
+
+    pub fn path(&self, path: &str) -> PathBuf {
+        let mut new_path = self.path.clone();
+        new_path.push(path);
+
+        new_path
+    }
 }
 
 pub fn setup() -> (String, Storage) {

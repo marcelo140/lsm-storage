@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::Stored;
 
@@ -23,36 +23,49 @@ pub static WAL_PATH: &str = "write-ahead-log";
 /// operations.
 pub struct MemTable {
     pub(crate) tree: BTreeMap<String, Stored>,
+    wal_path: PathBuf,
     wal: File,
 }
 
 impl MemTable {
     /// Creates an empty MemTable.
-    pub fn new(path: &Path) -> Result<Self> {
-        let wal = MemTable::create_wal(path)?;
+    pub fn new(wal_path: &Path) -> Result<Self> {
+        let wal = MemTable::create_wal(wal_path)?;
+
+        // TODO: this should be removed. the memtable should receive the wal_path and not a path for a directory
+        let mut wal_path = wal_path.to_path_buf();
+        wal_path.push(WAL_PATH);
 
         Ok(MemTable {
             tree: BTreeMap::new(),
+            wal_path,
             wal,
         })
     }
 
     /// Creates a MemTable from a write-ahead-log
-    pub fn recover(path: &Path) -> Result<Self> {
-        let wal = MemTable::open_wal(path)?;
+    pub fn recover(wal_path: &Path) -> Result<Self> {
+        let wal = MemTable::open_wal(wal_path)?;
+
+        // TODO: this should be removed. the memtable should receive the wal_path and not a path for a directory
+        let mut wal_path = wal_path.to_path_buf();
+        wal_path.push(WAL_PATH);
 
         let mut tree = BTreeMap::new();
         let mut bytes_read = 0;
 
-        while let Ok(deserialized_value) = bincode::deserialize_from(&wal) {
+        while let Ok(deserialized_value) = bincode::deserialize_from::<_, (String, Stored)>(&wal) {
             bytes_read += bincode::serialized_size(&deserialized_value)?;
-            let (key, value) = deserialized_value;
-            tree.insert(key, value);
+            tree.insert(deserialized_value.0, deserialized_value.1);
         }
 
         wal.set_len(bytes_read)?;
 
-        Ok(MemTable { tree, wal })
+        Ok(MemTable {
+            tree,
+            wal_path,
+            wal,
+        })
     }
 
     /// Inserts a new entry into the MemTable.
@@ -87,6 +100,22 @@ impl MemTable {
         }
     }
 
+    /// Persists the MemTable to disk storing its entries in-order.
+    ///
+    /// Returns the corresponding SSTable.
+    pub fn persist(self, path: &Path) -> Result<()> {
+        let mut fd = File::create(path)?;
+
+        let kvs: Vec<(String, Stored)> = self.tree.into_iter().collect();
+        for (key, value) in kvs {
+            bincode::serialize_into(&mut fd, &(&key, value))?;
+        }
+
+        std::fs::remove_file(self.wal_path)?;
+
+        Ok(())
+    }
+
     fn create_wal(path: &Path) -> std::io::Result<File> {
         let mut path = path.to_path_buf();
         path.push(WAL_PATH);
@@ -108,37 +137,43 @@ impl MemTable {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
+
     use crate::memtable::MemTable;
-    use crate::test_utils::*;
+    use crate::{test_utils::*, Stored};
 
     use anyhow::Result;
 
+    use super::WAL_PATH;
+
     #[test]
-    fn memtable_gets_and_inserts_are_successful() -> Result<()> {
+    fn get_should_see_inserted_entries() -> Result<()> {
         let test = Test::new();
         let mut memtable = test.create_memtable()?;
 
         memtable.insert("key1".to_string(), "value1".as_bytes().to_owned())?;
 
-        assert_eq!(memtable.get("key4"), None);
+        assert_eq!(memtable.get("key2"), None);
         assert_eq!(memtable.get("key1"), Some("value1".as_bytes()));
         test.clean()
     }
 
     #[test]
-    fn memtables_deletes_are_successful() -> Result<()> {
+    fn get_should_not_see_deleted_entries() -> Result<()> {
         let test = Test::new();
         let mut memtable = test.create_memtable()?;
 
+        memtable.remove("key1".to_string())?;
         memtable.insert("key2".to_string(), "value2".as_bytes().to_owned())?;
         memtable.remove("key2".to_string())?;
 
+        assert_eq!(memtable.get("key1"), None);
         assert_eq!(memtable.get("key2"), None);
         test.clean()
     }
 
     #[test]
-    fn recovering_through_wal_yields_the_same_tree() -> Result<()> {
+    fn recover_should_yield_the_same_memtable() -> Result<()> {
         let test = Test::new();
         let mut memtable = test.create_memtable()?;
 
@@ -152,13 +187,13 @@ mod tests {
     }
 
     #[test]
-    fn it_recovers_from_corrupted_wal() -> Result<()> {
+    fn recover_should_load_from_corrupted_wal() -> Result<()> {
         let test = Test::new();
         let mut memtable = test.create_memtable()?;
 
         memtable.insert("key1".to_string(), "value1".as_bytes().to_owned())?;
         memtable.insert("key2".to_string(), "value2".as_bytes().to_owned())?;
-        memtable.insert("key3".to_string(), "value1".as_bytes().to_owned())?;
+        memtable.insert("key3".to_string(), "value3".as_bytes().to_owned())?;
         memtable.remove("key1".to_string())?;
 
         test.corrupt_wal()?;
@@ -170,13 +205,13 @@ mod tests {
     }
 
     #[test]
-    fn corrupted_log_is_truncated() -> Result<()> {
+    fn recover_should_truncate_corrupted_log() -> Result<()> {
         let test = Test::new();
         let mut memtable = test.create_memtable()?;
 
-        memtable.insert("key2".to_string(), "value2".as_bytes().to_owned())?;
         memtable.insert("key1".to_string(), "value1".as_bytes().to_owned())?;
-        memtable.insert("key3".to_string(), "value1".as_bytes().to_owned())?;
+        memtable.insert("key2".to_string(), "value2".as_bytes().to_owned())?;
+        memtable.insert("key3".to_string(), "value3".as_bytes().to_owned())?;
 
         let wal = MemTable::open_wal(&test.path)?;
         let wal_metadata = wal.metadata()?;
@@ -190,5 +225,65 @@ mod tests {
 
         assert_eq!(wal_length, recovered_wal_length);
         test.clean()
+    }
+
+    #[test]
+    fn persist_should_store_all_elements_in_order() -> Result<()> {
+        let test = Test::new();
+
+        let mut memtable = test.create_memtable()?;
+        memtable.insert("c".to_string(), "value1".as_bytes().to_owned())?;
+        memtable.insert("a".to_string(), "value3".as_bytes().to_owned())?;
+        memtable.remove("a".to_string())?;
+        memtable.insert("b".to_string(), "value2".as_bytes().to_owned())?;
+
+        let sstable_path = test.path("sstable-1");
+        memtable.persist(&sstable_path)?;
+
+        let fd = File::open(sstable_path)?;
+        assert_eq!(read_entry(&fd)?, ("a".to_string(), Stored::Tombstone));
+        assert_eq!(
+            read_entry(&fd)?,
+            (
+                "b".to_string(),
+                Stored::Value("value2".as_bytes().to_owned())
+            )
+        );
+        assert_eq!(
+            read_entry(&fd)?,
+            (
+                "c".to_string(),
+                Stored::Value("value1".as_bytes().to_owned())
+            )
+        );
+
+        test.clean()
+    }
+
+    #[test]
+    fn persisting_memtable_should_delete_wal() -> Result<()> {
+        let test = Test::new();
+
+        let mut memtable = test.create_memtable()?;
+        memtable.insert("c".to_string(), "value1".as_bytes().to_owned())?;
+
+        let sstable_path = test.path("sstable-1");
+        memtable.persist(&sstable_path)?;
+
+        let wal_path = test.path(WAL_PATH);
+        let wal = File::open(wal_path);
+
+        assert_eq!(wal.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+
+        test.clean()
+    }
+
+    // TODO: this function is duplicated in SSTable. Move it to a common place.
+    fn read_entry<R>(reader: R) -> Result<(String, Stored)>
+    where
+        R: std::io::Read,
+    {
+        let entry = bincode::deserialize_from::<_, (String, Stored)>(reader)?;
+        Ok(entry)
     }
 }

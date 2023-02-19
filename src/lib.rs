@@ -7,6 +7,7 @@ mod sstable;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use std::borrow::BorrowMut;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -170,10 +171,10 @@ impl Storage {
     /// Performs a read by trying to find the value in the memtable and falling back to the
     /// sstables if not successful.
     pub fn read(&self, key: &str) -> Option<Vec<u8>> {
-        let engine = self.db.lock().unwrap();
+        let engine = &mut self.db.lock().unwrap();
 
         engine.memtable.get(key).map(|v| v.to_vec()).or_else(|| {
-            for table in engine.sstables.iter().rev() {
+            for table in engine.sstables.iter_mut().rev().borrow_mut() {
                 let v = table.get(key).unwrap();
 
                 if v.is_some() {
@@ -205,7 +206,9 @@ impl<'engine> WriteHandler<'engine> {
                 &mut engine.memtable,
                 MemTable::new(&self.engine.config.segments_path).unwrap(),
             );
-            let sstable = SSTable::from_memtable(memtable, &path)?;
+
+            memtable.persist(&path)?;
+            let sstable = SSTable::new(path)?;
 
             engine.sstables.push(sstable);
             engine.seq_logs += 1;
