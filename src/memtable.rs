@@ -5,7 +5,8 @@ use std::fs::{File, OpenOptions};
 use std::path::Path;
 
 use crate::Stored;
-use crate::sstable::SSTable;
+
+static WAL_PATH: &str = "write-ahead-log";
 
 /// An in-memory data-structure that keeps entries ordered by key.
 ///
@@ -18,67 +19,54 @@ use crate::sstable::SSTable;
 /// to persist to disk.
 ///
 /// In case of remove operations, the original key-pair may already be persisted in a persisted
-/// SSTable and thus cannot be simply removed. This is why we insert a Tombstone in remove 
+/// SSTable and thus cannot be simply removed. This is why we insert a Tombstone in remove
 /// operations.
-///
-/// TODO: discard WAL after persisting
 pub struct MemTable {
-    tree: BTreeMap<String, Stored>,
+    pub(crate) tree: BTreeMap<String, Stored>,
     wal: File,
 }
 
 impl MemTable {
     /// Creates an empty MemTable.
-    pub fn new(path: &Path) -> Self {
-        let mut path = path.to_path_buf();
-        path.push("write-ahead-log");
+    pub fn new(path: &Path) -> Result<Self> {
+        let wal = MemTable::create_wal(path)?;
 
-        let wal = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&path)
-            .unwrap();
-
-        MemTable {
+        Ok(MemTable {
             tree: BTreeMap::new(),
             wal,
-        }
+        })
     }
 
+    /// Creates a MemTable from a write-ahead-log
     pub fn recover(path: &Path) -> Result<Self> {
-        let mut path = path.to_path_buf();
-        path.push("write-ahead-log");
-
-        let wal = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)?;
+        let wal = MemTable::open_wal(path)?;
 
         let mut tree = BTreeMap::new();
         let mut bytes_read = 0;
 
-        while let Ok((key, value)) = bincode::deserialize_from(&wal) {
-            bytes_read += bincode::serialized_size(&(&key, &value)).unwrap();
+        while let Ok(deserialized_value) = bincode::deserialize_from(&wal) {
+            bytes_read += bincode::serialized_size(&deserialized_value)?;
+            let (key, value) = deserialized_value;
             tree.insert(key, value);
         }
 
         wal.set_len(bytes_read)?;
 
-        Ok(MemTable {
-            tree,
-            wal,
-        })
+        Ok(MemTable { tree, wal })
     }
 
-    /// Inserts a new entry into the MemTable, persisting it in the WAL for recovery purposes.
+    /// Inserts a new entry into the MemTable.
+    /// The new entry is persisted into the WAL for recovery purposes.
     pub fn insert(&mut self, key: String, value: Vec<u8>) -> Result<()> {
-        bincode::serialize_into(&mut self.wal, &(&key, Stored::Value(value.clone())))?;
-        self.tree.insert(key, Stored::Value(value));
+        let value = Stored::Value(value);
+        bincode::serialize_into(&mut self.wal, &(&key, &value))?;
+        self.tree.insert(key, value);
 
         Ok(())
     }
 
+    /// Removes an entry from the MemTable putting a tombstone in its place.
+    /// The tombstone is persisted into the WAL for recovery purposes.
     pub fn remove(&mut self, key: String) -> Result<()> {
         bincode::serialize_into(&mut self.wal, &(&key, Stored::Tombstone))?;
         self.tree.insert(key, Stored::Tombstone);
@@ -92,125 +80,120 @@ impl MemTable {
     }
 
     /// Returns the value corresponding to the given key, if present.
-    pub fn get(&self, key: &str) -> Option<Vec<u8>> {
-        match self.tree.get(key).cloned() {
+    pub fn get(&self, key: &str) -> Option<&[u8]> {
+        match self.tree.get(key) {
             Some(Stored::Value(v)) => Some(v),
             _ => None,
         }
     }
 
-    /// Persists the MemTable to disk storing its entries in-order.
-    ///
-    /// Returns the corresponding SSTable.
-    pub fn persist(self, path: &Path) -> Result<SSTable> {
-        let mut fd = File::create(path)?;
+    fn create_wal(path: &Path) -> std::io::Result<File> {
+        let mut path = path.to_path_buf();
+        path.push(WAL_PATH);
 
-        let kvs: Vec<(String, Stored)> = self.tree.into_iter().collect();
-        for (key, value) in kvs {
-            bincode::serialize_into(&mut fd, &(&key, value))?;
-        }
+        OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+    }
 
-        SSTable::new(path.to_path_buf())
+    fn open_wal(path: &Path) -> std::io::Result<File> {
+        let mut path = path.to_path_buf();
+        path.push(WAL_PATH);
+
+        OpenOptions::new().read(true).write(true).open(&path)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs::OpenOptions;
-
     use crate::memtable::MemTable;
     use crate::test_utils::*;
 
+    use anyhow::{Ok, Result};
+
     #[test]
-    fn memtable_gets_and_inserts_are_successful() {
-        let (uuid, _path, mut memtable) = setup_memtable();
+    fn memtable_gets_and_inserts_are_successful() -> Result<()> {
+        let test = Test::new();
+        let mut memtable = test.create_memtable();
 
-        memtable.insert("key2".to_string(), "value2".as_bytes().to_owned()).unwrap();
-        memtable.insert("key1".to_string(), "value1".as_bytes().to_owned()).unwrap();
-        memtable.insert("key3".to_string(), "value1".as_bytes().to_owned()).unwrap();
+        memtable.insert("key1".to_string(), "value1".as_bytes().to_owned())?;
 
-        assert_eq!(memtable.get("key1"), Some("value1".as_bytes().to_owned()));
         assert_eq!(memtable.get("key4"), None);
-
-        clean(&uuid);
+        assert_eq!(memtable.get("key1"), Some("value1".as_bytes()));
+        test.clean();
+        Ok(())
     }
 
     #[test]
-    fn memtables_deletes_are_successful() {
-        let (uuid, _path, mut memtable) = setup_memtable();
+    fn memtables_deletes_are_successful() -> Result<()> {
+        let test = Test::new();
+        let mut memtable = test.create_memtable();
 
-        memtable.insert("key2".to_string(), "value2".as_bytes().to_owned()).unwrap();
-        memtable.remove("key2".to_string()).unwrap();
+        memtable.insert("key2".to_string(), "value2".as_bytes().to_owned())?;
+        memtable.remove("key2".to_string())?;
 
         assert_eq!(memtable.get("key2"), None);
-
-        clean(&uuid);
+        test.clean();
+        Ok(())
     }
 
     #[test]
-    fn recovering_through_wal_yields_the_same_tree() {
-        let (uuid, path, mut memtable) = setup_memtable();
+    fn recovering_through_wal_yields_the_same_tree() -> Result<()> {
+        let test = Test::new();
+        let mut memtable = test.create_memtable();
 
-        memtable.insert("key2".to_string(), "value2".as_bytes().to_owned()).unwrap();
-        memtable.insert("key1".to_string(), "value1".as_bytes().to_owned()).unwrap();
-        memtable.insert("key3".to_string(), "value1".as_bytes().to_owned()).unwrap();
+        memtable.insert("key1".to_string(), "value1".as_bytes().to_owned())?;
+        memtable.insert("key2".to_string(), "value2".as_bytes().to_owned())?;
 
-        let recovered = MemTable::recover(&path).unwrap();
+        let recovered = MemTable::recover(&test.path)?;
 
         assert_eq!(memtable.tree, recovered.tree);
-
-        clean(&uuid);
+        test.clean();
+        Ok(())
     }
 
     #[test]
-    fn it_recovers_from_corrupted_wal() {
-        let (uuid, path, mut memtable) = setup_memtable();
+    fn it_recovers_from_corrupted_wal() -> Result<()> {
+        let test = Test::new();
+        let mut memtable = test.create_memtable();
 
-        memtable.insert("key2".to_string(), "value2".as_bytes().to_owned()).unwrap();
-        memtable.insert("key1".to_string(), "value1".as_bytes().to_owned()).unwrap();
-        memtable.insert("key3".to_string(), "value1".as_bytes().to_owned()).unwrap();
-        memtable.remove("key1".to_string()).unwrap();
+        memtable.insert("key1".to_string(), "value1".as_bytes().to_owned())?;
+        memtable.insert("key2".to_string(), "value2".as_bytes().to_owned())?;
+        memtable.insert("key3".to_string(), "value1".as_bytes().to_owned())?;
+        memtable.remove("key1".to_string())?;
 
-        let mut wal_path = path.to_path_buf();
-        wal_path.push("write-ahead-log");
-        let mut wal = OpenOptions::new().append(true).open(&wal_path).unwrap();
+        test.corrupt_wal();
 
-        bincode::serialize_into(&mut wal, &"5").unwrap();
-
-        let recovered = MemTable::recover(&path).unwrap();
+        let recovered = MemTable::recover(&test.path)?;
         assert_eq!(memtable.tree, recovered.tree);
 
-        clean(&uuid);
+        test.clean();
+        Ok(())
     }
 
     #[test]
-    fn corrupted_log_is_truncated() {
-        let (uuid, path, mut memtable) = setup_memtable();
+    fn corrupted_log_is_truncated() -> Result<()> {
+        let test = Test::new();
+        let mut memtable = test.create_memtable();
 
-        memtable.insert("key2".to_string(), "value2".as_bytes().to_owned()).unwrap();
-        memtable.insert("key1".to_string(), "value1".as_bytes().to_owned()).unwrap();
-        memtable.insert("key3".to_string(), "value1".as_bytes().to_owned()).unwrap();
+        memtable.insert("key2".to_string(), "value2".as_bytes().to_owned())?;
+        memtable.insert("key1".to_string(), "value1".as_bytes().to_owned())?;
+        memtable.insert("key3".to_string(), "value1".as_bytes().to_owned())?;
 
-        let mut wal_path = path.to_path_buf();
-        wal_path.push("write-ahead-log");
-
-        let mut wal = OpenOptions::new().append(true).open(&wal_path).unwrap();
-        let wal_metadata = wal.metadata().unwrap();
+        let wal = MemTable::open_wal(&test.path)?;
+        let wal_metadata = wal.metadata()?;
         let wal_length = wal_metadata.len();
 
-        bincode::serialize_into(&mut wal, &"5").unwrap();
+        test.corrupt_wal();
 
-        let wal_metadata = wal.metadata().unwrap();
-        let corrupted_wal_length = wal_metadata.len();
-
-        assert!(corrupted_wal_length > wal_length);
-
-        let _recovered = MemTable::recover(&path).unwrap();
-        let wal_metadata = wal.metadata().unwrap();
+        MemTable::recover(&test.path)?;
+        let wal_metadata = wal.metadata()?;
         let recovered_wal_length = wal_metadata.len();
 
         assert_eq!(wal_length, recovered_wal_length);
-
-        clean(&uuid);
+        test.clean();
+        Ok(())
     }
 }

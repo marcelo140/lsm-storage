@@ -88,7 +88,7 @@ impl StorageBuilder {
         let engine = Engine {
             sstables,
             seq_logs,
-            memtable: MemTable::new(&self.config.segments_path),
+            memtable: MemTable::new(&self.config.segments_path).unwrap(),
         };
 
         Ok(Storage {
@@ -178,7 +178,7 @@ impl Storage {
     pub fn read(&self, key: &str) -> Option<Vec<u8>> {
         let engine = self.db.lock().unwrap();
 
-        engine.memtable.get(key)
+        engine.memtable.get(key).map(|v| v.to_vec())
             .or_else(|| {
                 for table in engine.sstables.iter().rev() {
                     let v = table.get(key).unwrap();
@@ -208,8 +208,8 @@ impl<'engine> WriteHandler<'engine> {
         if engine.memtable.len() == self.engine.config.threshold {
             let path = self.engine.segment_path(engine.seq_logs);
 
-            let memtable = std::mem::replace(&mut engine.memtable, MemTable::new(&self.engine.config.segments_path));
-            let sstable = memtable.persist(&path)?;
+            let memtable = std::mem::replace(&mut engine.memtable, MemTable::new(&self.engine.config.segments_path).unwrap());
+            let sstable = SSTable::from_memtable(memtable, &path)?;
 
             engine.sstables.push(sstable);
             engine.seq_logs += 1;

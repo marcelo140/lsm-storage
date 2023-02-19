@@ -3,21 +3,15 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 
 use crate::Stored;
+use crate::memtable::MemTable;
 
 /// A data structure that allows read-only access into an ordered set of <key, value> pairs persisted on-disk.
 ///
 /// Upon initialization, all entries are read to build an index with the offset for each key. This
 /// allows for quick reads into the log by seeking directly into the correct offset.
-///
-/// Supported:
-/// - read value
-/// - in-memory index
-/// TODO:
-/// - merge
-/// - make the index sparse
 pub struct SSTable {
     path: PathBuf,
     indexes: HashMap<String, u64>,
@@ -42,6 +36,20 @@ impl SSTable {
         }
 
         Ok(SSTable { path, indexes })
+    }
+
+    /// Persists the MemTable to disk storing its entries in-order.
+    ///
+    /// Returns the corresponding SSTable.
+    pub fn from_memtable(memtable: MemTable, path: &Path) -> Result<Self> {
+        let mut fd = File::create(path)?;
+
+        let kvs: Vec<(String, Stored)> = memtable.tree.into_iter().collect();
+        for (key, value) in kvs {
+            bincode::serialize_into(&mut fd, &(&key, value))?;
+        }
+
+        SSTable::new(path.to_path_buf())
     }
 
     /// Returns the value for the provided key if it is stored in the SSTable.
