@@ -6,8 +6,6 @@ use std::path::{Path, PathBuf};
 
 use crate::Stored;
 
-pub static WAL_PATH: &str = "write-ahead-log";
-
 /// An in-memory data-structure that keeps entries ordered by key.
 ///
 /// It is hard to keep a mutable on-disk data structure ordered without losing performance. To
@@ -32,13 +30,9 @@ impl MemTable {
     pub fn new(wal_path: &Path) -> Result<Self> {
         let wal = MemTable::create_wal(wal_path)?;
 
-        // TODO: this should be removed. the memtable should receive the wal_path and not a path for a directory
-        let mut wal_path = wal_path.to_path_buf();
-        wal_path.push(WAL_PATH);
-
         Ok(MemTable {
             tree: BTreeMap::new(),
-            wal_path,
+            wal_path: wal_path.to_path_buf(),
             wal,
         })
     }
@@ -46,10 +40,6 @@ impl MemTable {
     /// Creates a MemTable from a write-ahead-log
     pub fn recover(wal_path: &Path) -> Result<Self> {
         let wal = MemTable::open_wal(wal_path)?;
-
-        // TODO: this should be removed. the memtable should receive the wal_path and not a path for a directory
-        let mut wal_path = wal_path.to_path_buf();
-        wal_path.push(WAL_PATH);
 
         let mut tree = BTreeMap::new();
         let mut bytes_read = 0;
@@ -63,7 +53,7 @@ impl MemTable {
 
         Ok(MemTable {
             tree,
-            wal_path,
+            wal_path: wal_path.to_path_buf(),
             wal,
         })
     }
@@ -117,21 +107,15 @@ impl MemTable {
     }
 
     fn create_wal(path: &Path) -> std::io::Result<File> {
-        let mut path = path.to_path_buf();
-        path.push(WAL_PATH);
-
         OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
-            .open(&path)
+            .open(path)
     }
 
     fn open_wal(path: &Path) -> std::io::Result<File> {
-        let mut path = path.to_path_buf();
-        path.push(WAL_PATH);
-
-        OpenOptions::new().read(true).write(true).open(&path)
+        OpenOptions::new().read(true).write(true).open(path)
     }
 }
 
@@ -144,11 +128,9 @@ mod tests {
 
     use anyhow::Result;
 
-    use super::WAL_PATH;
-
     #[test]
     fn get_should_see_inserted_entries() -> Result<()> {
-        let test = Test::new();
+        let test = Test::new()?;
         let mut memtable = test.create_memtable()?;
 
         memtable.insert("key1".to_string(), "value1".as_bytes().to_owned())?;
@@ -160,7 +142,7 @@ mod tests {
 
     #[test]
     fn get_should_not_see_deleted_entries() -> Result<()> {
-        let test = Test::new();
+        let test = Test::new()?;
         let mut memtable = test.create_memtable()?;
 
         memtable.remove("key1".to_string())?;
@@ -174,13 +156,13 @@ mod tests {
 
     #[test]
     fn recover_should_yield_the_same_memtable() -> Result<()> {
-        let test = Test::new();
+        let test = Test::new()?;
         let mut memtable = test.create_memtable()?;
 
         memtable.insert("key1".to_string(), "value1".as_bytes().to_owned())?;
         memtable.insert("key2".to_string(), "value2".as_bytes().to_owned())?;
 
-        let recovered = MemTable::recover(&test.path)?;
+        let recovered = MemTable::recover(&test.wal_path())?;
 
         assert_eq!(memtable.tree, recovered.tree);
         test.clean()
@@ -188,7 +170,7 @@ mod tests {
 
     #[test]
     fn recover_should_load_from_corrupted_wal() -> Result<()> {
-        let test = Test::new();
+        let test = Test::new()?;
         let mut memtable = test.create_memtable()?;
 
         memtable.insert("key1".to_string(), "value1".as_bytes().to_owned())?;
@@ -198,7 +180,7 @@ mod tests {
 
         test.corrupt_wal()?;
 
-        let recovered = MemTable::recover(&test.path)?;
+        let recovered = MemTable::recover(&test.wal_path())?;
         assert_eq!(memtable.tree, recovered.tree);
 
         test.clean()
@@ -206,20 +188,20 @@ mod tests {
 
     #[test]
     fn recover_should_truncate_corrupted_log() -> Result<()> {
-        let test = Test::new();
+        let test = Test::new()?;
         let mut memtable = test.create_memtable()?;
 
         memtable.insert("key1".to_string(), "value1".as_bytes().to_owned())?;
         memtable.insert("key2".to_string(), "value2".as_bytes().to_owned())?;
         memtable.insert("key3".to_string(), "value3".as_bytes().to_owned())?;
 
-        let wal = MemTable::open_wal(&test.path)?;
+        let wal = MemTable::open_wal(&test.wal_path())?;
         let wal_metadata = wal.metadata()?;
         let wal_length = wal_metadata.len();
 
         test.corrupt_wal()?;
 
-        MemTable::recover(&test.path)?;
+        MemTable::recover(&test.wal_path())?;
         let wal_metadata = wal.metadata()?;
         let recovered_wal_length = wal_metadata.len();
 
@@ -229,7 +211,7 @@ mod tests {
 
     #[test]
     fn persist_should_store_all_elements_in_order() -> Result<()> {
-        let test = Test::new();
+        let test = Test::new()?;
 
         let mut memtable = test.create_memtable()?;
         memtable.insert("c".to_string(), "value1".as_bytes().to_owned())?;
@@ -262,7 +244,7 @@ mod tests {
 
     #[test]
     fn persisting_memtable_should_delete_wal() -> Result<()> {
-        let test = Test::new();
+        let test = Test::new()?;
 
         let mut memtable = test.create_memtable()?;
         memtable.insert("c".to_string(), "value1".as_bytes().to_owned())?;
@@ -270,7 +252,7 @@ mod tests {
         let sstable_path = test.path("sstable-1");
         memtable.persist(&sstable_path)?;
 
-        let wal_path = test.path(WAL_PATH);
+        let wal_path = test.wal_path();
         let wal = File::open(wal_path);
 
         assert_eq!(wal.unwrap_err().kind(), std::io::ErrorKind::NotFound);

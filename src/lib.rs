@@ -25,6 +25,8 @@ enum Stored {
 struct Config {
     /// The path where the segments are stored.
     segments_path: PathBuf,
+    /// The path where the segments are stored.
+    wal_path: PathBuf,
     /// The pattern for the segments name.
     segments_name: String,
     /// The size at which a memtable is converted into a sstable.
@@ -57,7 +59,8 @@ impl StorageBuilder {
 
         StorageBuilder {
             config: Config {
-                segments_path: path,
+                segments_path: path.clone(),
+                wal_path: path,
                 segments_name: "seg-logs".to_owned(),
                 threshold: 1024,
             },
@@ -65,7 +68,13 @@ impl StorageBuilder {
     }
 
     pub fn segments_path(mut self, segments_path: PathBuf) -> Self {
+        // TODO: this shouldn't be here but just hacking away for now
+        let mut wal_path = segments_path.clone();
+        wal_path.push("memtable_wal");
+
         self.config.segments_path = segments_path;
+        self.config.wal_path = wal_path;
+
         self
     }
 
@@ -88,7 +97,7 @@ impl StorageBuilder {
         let engine = Engine {
             sstables,
             seq_logs,
-            memtable: MemTable::new(&self.config.segments_path).unwrap(),
+            memtable: MemTable::new(&self.config.wal_path).unwrap(),
         };
 
         Ok(Storage {
@@ -204,7 +213,7 @@ impl<'engine> WriteHandler<'engine> {
 
             let memtable = std::mem::replace(
                 &mut engine.memtable,
-                MemTable::new(&self.engine.config.segments_path).unwrap(),
+                MemTable::new(&self.engine.config.wal_path).unwrap(),
             );
 
             memtable.persist(&path)?;

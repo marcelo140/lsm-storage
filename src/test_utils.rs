@@ -1,37 +1,40 @@
 use std::fs;
 use std::fs::OpenOptions;
+use std::path::Path;
 use std::path::PathBuf;
 
-use crate::memtable::WAL_PATH;
 use crate::MemTable;
 use crate::Storage;
 use anyhow::Result;
 
 use uuid::Uuid;
 
+static WAL_PATH: &str = "write-ahead-log";
+
 pub struct Test {
     pub path: PathBuf,
 }
 
 impl Test {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self> {
         let uuid = Uuid::new_v4().to_hyphenated().to_string();
 
         let mut path = PathBuf::from(".");
         path.push(&uuid);
 
-        Test { path }
+        fs::create_dir_all(&path)?;
+
+        Ok(Test { path })
     }
 
     pub fn create_memtable(&self) -> Result<MemTable> {
-        fs::create_dir_all(&self.path)?;
+        let wal_path = self.wal_path();
 
-        Ok(MemTable::new(&self.path)?)
+        Ok(MemTable::new(&wal_path)?)
     }
 
     pub fn corrupt_wal(&self) -> Result<()> {
-        let mut wal_path = self.path.to_path_buf();
-        wal_path.push(WAL_PATH);
+        let wal_path = self.wal_path();
         let mut wal = OpenOptions::new().append(true).open(&wal_path)?;
 
         bincode::serialize_into(&mut wal, &"5")?;
@@ -49,6 +52,14 @@ impl Test {
 
         new_path
     }
+
+    pub fn wal_path(&self) -> PathBuf {
+        let mut wal_path = self.path.clone();
+        wal_path.push(WAL_PATH);
+
+        wal_path
+    }
+
 }
 
 pub fn setup() -> (String, Storage) {
@@ -56,20 +67,6 @@ pub fn setup() -> (String, Storage) {
     let engine = engine_from_uuid(&uuid);
 
     (uuid, engine)
-}
-
-pub fn setup_memtable() -> (String, PathBuf, MemTable) {
-    let uuid = Uuid::new_v4().to_hyphenated().to_string();
-
-    let mut path = PathBuf::new();
-    path.push(".");
-    path.push(&uuid);
-
-    fs::create_dir_all(&path).unwrap();
-
-    let memtable = MemTable::new(&path).unwrap();
-
-    (uuid, path, memtable)
 }
 
 pub fn clean(uuid: &str) {
