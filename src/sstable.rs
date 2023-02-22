@@ -6,6 +6,7 @@ use std::io::{Seek, SeekFrom};
 use std::path::PathBuf;
 
 use crate::Stored;
+use crate::format;
 
 /// A data structure that allows read-only access into an ordered set of <key, value> pairs persisted on-disk.
 ///
@@ -30,26 +31,13 @@ impl SSTable {
 
         let mut bytes_read = 0;
 
-        while let Ok(entry) = SSTable::read_entry(fd) {
-            let pair_size = SSTable::entry_size(&entry)?;
+        while let Ok(entry) = format::read_entry(fd) {
+            let pair_size = format::entry_size(&entry)?;
             indexes.insert(entry.0, bytes_read);
             bytes_read += pair_size;
         }
 
         Ok(indexes)
-    }
-
-    fn read_entry<R>(reader: R) -> Result<(String, Stored)>
-    where
-        R: std::io::Read,
-    {
-        let entry = bincode::deserialize_from::<_, (String, Stored)>(reader)?;
-        Ok(entry)
-    }
-
-    fn entry_size(entry: &(String, Stored)) -> Result<u64> {
-        let size = bincode::serialized_size(&entry).unwrap();
-        Ok(size)
     }
 
     /// Returns the value for the provided key if it is stored in the SSTable.
@@ -62,7 +50,7 @@ impl SSTable {
         }
 
         self.fd.seek(SeekFrom::Start(*value_position.unwrap()))?;
-        let (_key, value) = bincode::deserialize_from::<&File, (String, Stored)>(&self.fd)?;
+        let (_key, value) = format::read_entry(&self.fd)?;
 
         match value {
             Stored::Value(v) => Ok(Some(v)),

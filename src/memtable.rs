@@ -5,6 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use crate::Stored;
+use crate::format;
 
 /// An in-memory data-structure that keeps entries ordered by key.
 ///
@@ -44,8 +45,8 @@ impl MemTable {
         let mut tree = BTreeMap::new();
         let mut bytes_read = 0;
 
-        while let Ok(deserialized_value) = bincode::deserialize_from::<_, (String, Stored)>(&wal) {
-            bytes_read += bincode::serialized_size(&deserialized_value)?;
+        while let Ok(deserialized_value) = format::read_entry(&wal) {
+            bytes_read += format::entry_size(&deserialized_value)?;
             tree.insert(deserialized_value.0, deserialized_value.1);
         }
 
@@ -62,7 +63,7 @@ impl MemTable {
     /// The new entry is persisted into the WAL for recovery purposes.
     pub fn insert(&mut self, key: String, value: Vec<u8>) -> Result<()> {
         let value = Stored::Value(value);
-        bincode::serialize_into(&mut self.wal, &(&key, &value))?;
+        format::write_entry(&mut self.wal, &key, &value)?;
         self.tree.insert(key, value);
 
         Ok(())
@@ -71,7 +72,7 @@ impl MemTable {
     /// Removes an entry from the MemTable putting a tombstone in its place.
     /// The tombstone is persisted into the WAL for recovery purposes.
     pub fn remove(&mut self, key: String) -> Result<()> {
-        bincode::serialize_into(&mut self.wal, &(&key, Stored::Tombstone))?;
+        format::write_entry(&mut self.wal, &key, &Stored::Tombstone)?;
         self.tree.insert(key, Stored::Tombstone);
 
         Ok(())
@@ -98,7 +99,7 @@ impl MemTable {
 
         let kvs: Vec<(String, Stored)> = self.tree.into_iter().collect();
         for (key, value) in kvs {
-            bincode::serialize_into(&mut fd, &(&key, value))?;
+            format::write_entry(&mut fd, &key, &value)?;
         }
 
         std::fs::remove_file(self.wal_path)?;
@@ -124,6 +125,7 @@ mod tests {
     use std::fs::File;
 
     use crate::memtable::MemTable;
+    use crate::format;
     use crate::{test_utils::*, Stored};
 
     use anyhow::Result;
@@ -223,16 +225,16 @@ mod tests {
         memtable.persist(&sstable_path)?;
 
         let fd = File::open(sstable_path)?;
-        assert_eq!(read_entry(&fd)?, ("a".to_string(), Stored::Tombstone));
+        assert_eq!(format::read_entry(&fd)?, ("a".to_string(), Stored::Tombstone));
         assert_eq!(
-            read_entry(&fd)?,
+            format::read_entry(&fd)?,
             (
                 "b".to_string(),
                 Stored::Value("value2".as_bytes().to_owned())
             )
         );
         assert_eq!(
-            read_entry(&fd)?,
+            format::read_entry(&fd)?,
             (
                 "c".to_string(),
                 Stored::Value("value1".as_bytes().to_owned())
@@ -258,14 +260,5 @@ mod tests {
         assert_eq!(wal.unwrap_err().kind(), std::io::ErrorKind::NotFound);
 
         test.clean()
-    }
-
-    // TODO: this function is duplicated in SSTable. Move it to a common place.
-    fn read_entry<R>(reader: R) -> Result<(String, Stored)>
-    where
-        R: std::io::Read,
-    {
-        let entry = bincode::deserialize_from::<_, (String, Stored)>(reader)?;
-        Ok(entry)
     }
 }

@@ -3,6 +3,7 @@ mod test_utils;
 
 mod memtable;
 mod sstable;
+mod format;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
