@@ -1,11 +1,10 @@
-use anyhow::Result;
-
-use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
-use std::path::{Path, PathBuf};
-
 use crate::format;
 use crate::Stored;
+use anyhow::Result;
+use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 /// An in-memory data-structure that keeps entries ordered by key.
 ///
@@ -63,7 +62,9 @@ impl MemTable {
     /// The new entry is persisted into the WAL for recovery purposes.
     pub fn insert(&mut self, key: String, value: Vec<u8>) -> Result<()> {
         let value = Stored::Value(value);
+
         format::write_entry(&mut self.wal, &key, &value)?;
+        self.wal.flush()?;
         self.tree.insert(key, value);
 
         Ok(())
@@ -73,6 +74,7 @@ impl MemTable {
     /// The tombstone is persisted into the WAL for recovery purposes.
     pub fn remove(&mut self, key: String) -> Result<()> {
         format::write_entry(&mut self.wal, &key, &Stored::Tombstone)?;
+        self.wal.flush()?;
         self.tree.insert(key, Stored::Tombstone);
 
         Ok(())
@@ -101,6 +103,7 @@ impl MemTable {
         for (key, value) in kvs {
             format::write_entry(&mut fd, &key, &value)?;
         }
+        fd.flush()?;
 
         std::fs::remove_file(self.wal_path)?;
 
