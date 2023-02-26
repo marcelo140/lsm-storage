@@ -1,12 +1,10 @@
+use crate::format;
+use crate::Stored;
 use anyhow::Result;
-
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Seek, SeekFrom};
 use std::path::PathBuf;
-
-use crate::Stored;
-use crate::format;
 
 /// A data structure that allows read-only access into an ordered set of <key, value> pairs persisted on-disk.
 ///
@@ -63,7 +61,7 @@ impl SSTable {
 mod tests {
     use anyhow::Result;
 
-    use crate::test_utils::*;
+    use crate::{test_utils::*, Stored};
 
     #[test]
     fn constructor_should_load_sstable_correctly() -> Result<()> {
@@ -72,18 +70,21 @@ mod tests {
 
     #[test]
     fn get_should_return_expected_value() -> Result<()> {
-        let (uuid, mut engine) = setup();
+        let test = Test::new()?;
 
-        let times = engine.config.threshold + 1;
-        inject(&mut engine, times);
+        let mut sstable = test.generate_sstable(vec![
+            ("key-1".to_owned(), Stored::Value(b"value-1".to_vec())),
+            ("key-2".to_owned(), Stored::Value(b"value-2".to_vec())),
+            ("key-3".to_owned(), Stored::Value(b"value-3".to_vec())),
+        ])?;
 
-        let mut engine = engine.db.lock().unwrap();
-        let table = &mut engine.sstables[0];
-        let value = String::from_utf8(table.get("key-3").unwrap().unwrap()).unwrap();
-        assert_eq!("value-3", value);
+        let value = sstable.get("key-1")?;
+        assert!(value.is_some());
 
-        clean(&uuid);
-        Ok(())
+        let deserialized_value = String::from_utf8(value.unwrap())?;
+        assert_eq!("value-1", deserialized_value);
+
+        test.clean()
     }
 
     #[test]

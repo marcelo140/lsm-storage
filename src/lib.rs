@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod test_utils;
 
+mod format;
 mod memtable;
 mod sstable;
-mod format;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

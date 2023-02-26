@@ -1,15 +1,18 @@
-use std::fs;
-use std::fs::OpenOptions;
-use std::path::Path;
-use std::path::PathBuf;
-
+use crate::format;
+use crate::sstable::SSTable;
 use crate::MemTable;
 use crate::Storage;
+use crate::Stored;
+use anyhow::Ok;
 use anyhow::Result;
-
+use std::fs;
+use std::fs::File;
+use std::fs::OpenOptions;
+use std::path::PathBuf;
 use uuid::Uuid;
 
 static WAL_PATH: &str = "write-ahead-log";
+static SSTABLE_PATH: &str = "sstable";
 
 pub struct Test {
     pub path: PathBuf,
@@ -31,6 +34,17 @@ impl Test {
         let wal_path = self.wal_path();
 
         Ok(MemTable::new(&wal_path)?)
+    }
+
+    pub(crate) fn generate_sstable(&self, values: Vec<(String, Stored)>) -> Result<SSTable> {
+        let path = self.path(SSTABLE_PATH);
+        let mut fd = File::create(path.clone())?;
+
+        for (key, value) in values {
+            format::write_entry(&mut fd, &key, &value)?;
+        }
+
+        SSTable::new(path)
     }
 
     pub fn corrupt_wal(&self) -> Result<()> {
@@ -59,7 +73,6 @@ impl Test {
 
         wal_path
     }
-
 }
 
 pub fn setup() -> (String, Storage) {

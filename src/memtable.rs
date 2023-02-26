@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
-use crate::Stored;
 use crate::format;
+use crate::Stored;
 
 /// An in-memory data-structure that keeps entries ordered by key.
 ///
@@ -124,8 +124,8 @@ impl MemTable {
 mod tests {
     use std::fs::File;
 
-    use crate::memtable::MemTable;
     use crate::format;
+    use crate::memtable::MemTable;
     use crate::{test_utils::*, Stored};
 
     use anyhow::Result;
@@ -225,7 +225,10 @@ mod tests {
         memtable.persist(&sstable_path)?;
 
         let fd = File::open(sstable_path)?;
-        assert_eq!(format::read_entry(&fd)?, ("a".to_string(), Stored::Tombstone));
+        assert_eq!(
+            format::read_entry(&fd)?,
+            ("a".to_string(), Stored::Tombstone)
+        );
         assert_eq!(
             format::read_entry(&fd)?,
             (
