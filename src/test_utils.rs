@@ -36,12 +36,16 @@ impl Test {
         Ok(MemTable::new(&wal_path)?)
     }
 
-    pub(crate) fn generate_sstable(&self, values: Vec<(String, Stored)>) -> Result<SSTable> {
-        let path = self.path(SSTABLE_PATH);
+    pub(crate) fn generate_sstable(
+        &self,
+        name: &str,
+        values: &[(String, Stored)],
+    ) -> Result<SSTable> {
+        let path = self.path(&format!("{}-{}", SSTABLE_PATH, name));
         let mut fd = File::create(path.clone())?;
 
         for (key, value) in values {
-            format::write_entry(&mut fd, &key, &value)?;
+            format::write_entry(&mut fd, key, value)?;
         }
 
         SSTable::new(path)
@@ -72,6 +76,13 @@ impl Test {
         wal_path.push(WAL_PATH);
 
         wal_path
+    }
+
+    pub fn sstable_path(&self, name: &str) -> PathBuf {
+        let mut sstable_path = self.path.clone();
+        sstable_path.push(format!("{}-{}", SSTABLE_PATH, name));
+
+        sstable_path
     }
 }
 

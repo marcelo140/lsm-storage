@@ -44,7 +44,7 @@ impl MemTable {
         let mut tree = BTreeMap::new();
         let mut bytes_read = 0;
 
-        while let Ok(deserialized_value) = format::read_entry(&wal) {
+        while let Ok(Some(deserialized_value)) = format::read_entry(&wal) {
             bytes_read += format::entry_size(&deserialized_value)?;
             tree.insert(deserialized_value.0, deserialized_value.1);
         }
@@ -229,18 +229,18 @@ mod tests {
 
         let fd = File::open(sstable_path)?;
         assert_eq!(
-            format::read_entry(&fd)?,
+            format::read_entry(&fd)?.unwrap(),
             ("a".to_string(), Stored::Tombstone)
         );
         assert_eq!(
-            format::read_entry(&fd)?,
+            format::read_entry(&fd)?.unwrap(),
             (
                 "b".to_string(),
                 Stored::Value("value2".as_bytes().to_owned())
             )
         );
         assert_eq!(
-            format::read_entry(&fd)?,
+            format::read_entry(&fd)?.unwrap(),
             (
                 "c".to_string(),
                 Stored::Value("value1".as_bytes().to_owned())
