@@ -43,6 +43,7 @@ pub struct Engine {
 
 /// The engine and its configuration. Why isn't the configuration inside the engine itself?
 /// Maybe because it's read-only.
+#[derive(Clone)]
 pub struct Storage {
     db: Arc<Mutex<Engine>>,
     config: Arc<Config>,
