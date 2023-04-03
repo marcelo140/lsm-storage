@@ -1,7 +1,7 @@
 use crate::format;
+use crate::memtable::MemTable;
 use crate::sstable::SSTable;
-use crate::MemTable;
-use crate::Storage;
+use crate::storage::Storage;
 use crate::Stored;
 use anyhow::Ok;
 use anyhow::Result;
