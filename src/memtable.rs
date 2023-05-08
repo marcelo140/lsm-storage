@@ -142,7 +142,7 @@ mod tests {
 
         assert_eq!(memtable.get("key2"), None);
         assert_eq!(memtable.get("key1"), Some("value1".as_bytes()));
-        test.clean()
+        Ok(())
     }
 
     #[test]
@@ -156,7 +156,7 @@ mod tests {
 
         assert_eq!(memtable.get("key1"), None);
         assert_eq!(memtable.get("key2"), None);
-        test.clean()
+        Ok(())
     }
 
     #[test]
@@ -170,7 +170,7 @@ mod tests {
         let recovered = MemTable::recover(&test.wal_path())?;
 
         assert_eq!(memtable.tree, recovered.tree);
-        test.clean()
+        Ok(())
     }
 
     #[test]
@@ -188,7 +188,7 @@ mod tests {
         let recovered = MemTable::recover(&test.wal_path())?;
         assert_eq!(memtable.tree, recovered.tree);
 
-        test.clean()
+        Ok(())
     }
 
     #[test]
@@ -211,7 +211,7 @@ mod tests {
         let recovered_wal_length = wal_metadata.len();
 
         assert_eq!(wal_length, recovered_wal_length);
-        test.clean()
+        Ok(())
     }
 
     #[test]
@@ -247,7 +247,7 @@ mod tests {
             )
         );
 
-        test.clean()
+        Ok(())
     }
 
     #[test]
@@ -265,6 +265,6 @@ mod tests {
 
         assert_eq!(wal.unwrap_err().kind(), std::io::ErrorKind::NotFound);
 
-        test.clean()
+        Ok(())
     }
 }

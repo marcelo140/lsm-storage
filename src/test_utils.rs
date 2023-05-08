@@ -3,9 +3,12 @@ use crate::memtable::MemTable;
 use crate::sstable::SSTable;
 use crate::storage::Storage;
 use crate::Stored;
+
 use anyhow::Ok;
 use anyhow::Result;
-use std::fs;
+use tempfile::tempdir as create_tempdir;
+use tempfile::TempDir;
+
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
@@ -15,19 +18,14 @@ static WAL_PATH: &str = "write-ahead-log";
 static SSTABLE_PATH: &str = "sstable";
 
 pub struct Test {
-    pub path: PathBuf,
+    tempdir: TempDir,
 }
 
 impl Test {
     pub fn new() -> Result<Self> {
-        let uuid = Uuid::new_v4().to_hyphenated().to_string();
-
-        let mut path = PathBuf::from(".");
-        path.push(&uuid);
-
-        fs::create_dir_all(&path)?;
-
-        Ok(Test { path })
+        Ok(Test {
+            tempdir: create_tempdir()?,
+        })
     }
 
     pub fn create_memtable(&self) -> Result<MemTable> {
@@ -59,27 +57,22 @@ impl Test {
         Ok(())
     }
 
-    pub fn clean(self) -> Result<()> {
-        std::fs::remove_dir_all(self.path)?;
-        Ok(())
-    }
-
     pub fn path(&self, path: &str) -> PathBuf {
-        let mut new_path = self.path.clone();
+        let mut new_path = self.tempdir.path().to_owned();
         new_path.push(path);
 
         new_path
     }
 
     pub fn wal_path(&self) -> PathBuf {
-        let mut wal_path = self.path.clone();
+        let mut wal_path = self.tempdir.path().to_owned();
         wal_path.push(WAL_PATH);
 
         wal_path
     }
 
     pub fn sstable_path(&self, name: &str) -> PathBuf {
-        let mut sstable_path = self.path.clone();
+        let mut sstable_path = self.tempdir.path().to_owned();
         sstable_path.push(format!("{}-{}", SSTABLE_PATH, name));
 
         sstable_path

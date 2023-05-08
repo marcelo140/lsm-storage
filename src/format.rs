@@ -59,6 +59,6 @@ mod test {
         let v = crate::format::read_entry(&fd)?;
         assert!(v.is_none());
 
-        test.clean()
+        Ok(())
     }
 }

@@ -148,7 +148,7 @@ mod tests {
             ("key-3".to_owned(), Stored::Value(b"value-3".to_vec()))
         );
 
-        test.clean()
+        Ok(())
     }
 
     #[test]
@@ -170,7 +170,7 @@ mod tests {
         let deserialized_value = String::from_utf8(value.unwrap())?;
         assert_eq!("value-1", deserialized_value);
 
-        test.clean()
+        Ok(())
     }
 
     #[test]
@@ -226,6 +226,6 @@ mod tests {
             ("key-5".to_string(), Stored::Tombstone)
         );
 
-        test.clean()
+        Ok(())
     }
 }
