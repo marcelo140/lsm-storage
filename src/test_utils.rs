@@ -1,7 +1,6 @@
 use crate::format;
 use crate::memtable::MemTable;
 use crate::sstable::SSTable;
-use crate::storage::Storage;
 use crate::Stored;
 
 use anyhow::Ok;
@@ -12,7 +11,6 @@ use tempfile::TempDir;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
-use uuid::Uuid;
 
 static WAL_PATH: &str = "write-ahead-log";
 static SSTABLE_PATH: &str = "sstable";
@@ -57,6 +55,10 @@ impl Test {
         Ok(())
     }
 
+    pub fn simple_path(&self) -> PathBuf {
+        self.tempdir.path().to_owned()
+    }
+
     pub fn path(&self, path: &str) -> PathBuf {
         let mut new_path = self.tempdir.path().to_owned();
         new_path.push(path);
@@ -76,48 +78,5 @@ impl Test {
         sstable_path.push(format!("{}-{}", SSTABLE_PATH, name));
 
         sstable_path
-    }
-}
-
-pub fn setup() -> (String, Storage) {
-    let uuid = Uuid::new_v4().to_hyphenated().to_string();
-    let engine = engine_from_uuid(&uuid);
-
-    (uuid, engine)
-}
-
-pub fn clean(uuid: &str) {
-    let mut path = PathBuf::new();
-    path.push(".");
-    path.push(&uuid);
-
-    std::fs::remove_dir_all(path).unwrap();
-}
-
-pub fn engine_from_uuid(uuid: &str) -> Storage {
-    let mut path = PathBuf::new();
-    path.push(".");
-    path.push(&uuid);
-
-    Storage::builder().segments_path(path).build().unwrap()
-}
-
-pub fn inject(engine: &mut Storage, times: usize) {
-    let mut writer = engine.open_as_writer().unwrap();
-
-    for i in 0..times {
-        let k = format!("key-{}", i);
-        let v = format!("value-{}", i).as_bytes().to_owned();
-        writer.insert(k, v).unwrap();
-    }
-}
-
-pub fn inject_from(engine: &mut Storage, times: usize, start: usize) {
-    let mut writer = engine.open_as_writer().unwrap();
-
-    for i in start..start + times {
-        let k = format!("key-{}", i);
-        let v = format!("value-{}", i).as_bytes().to_owned();
-        writer.insert(k, v).unwrap();
     }
 }

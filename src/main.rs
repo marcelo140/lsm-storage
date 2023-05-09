@@ -12,7 +12,7 @@ async fn main() {
     let storage = Storage::builder().segments_path(segments).build().unwrap();
 
     let app = Router::new()
-        .route("/key/:key", get(kv_get).post(kv_insert))
+        .route("/key/:key", get(kv_get).post(kv_insert).delete(kv_delete))
         .with_state(storage);
 
     axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
@@ -42,6 +42,16 @@ async fn kv_insert(
 ) -> Result<(), StatusCode> {
     let mut writer = storage.open_as_writer().unwrap();
     writer.insert(key, body.into_bytes()).unwrap();
+
+    Ok(())
+}
+
+async fn kv_delete(
+    State(mut storage): State<Storage>,
+    Path(key): Path<String>
+) -> Result<(), StatusCode> {
+    let mut writer = storage.open_as_writer().unwrap();
+    writer.remove(key).unwrap();
 
     Ok(())
 }

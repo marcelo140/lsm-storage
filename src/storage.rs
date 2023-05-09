@@ -25,7 +25,7 @@ struct Config {
 /// Maybe because it's read-only.
 #[derive(Clone)]
 pub struct Storage {
-    db: Arc<Mutex<Engine>>,
+    engine: Arc<Mutex<Engine>>,
     config: Arc<Config>,
 }
 
@@ -85,7 +85,7 @@ impl StorageBuilder {
 
         Ok(Storage {
             config: Arc::new(self.config),
-            db: Arc::new(Mutex::new(engine)),
+            engine: Arc::new(Mutex::new(engine)),
         })
     }
 
@@ -127,7 +127,7 @@ impl Default for StorageBuilder {
 
 /// A borrow of the storage that allows writing.
 pub struct WriteHandler<'engine> {
-    engine: &'engine mut Storage,
+    storage: &'engine mut Storage,
 }
 
 impl Storage {
@@ -164,14 +164,14 @@ impl Storage {
             .create_new(true)
             .write(true)
             .open(lock)
-            .map(move |_| WriteHandler { engine: self })
+            .map(move |_| WriteHandler { storage: self })
             .map_err(From::from)
     }
 
     /// Performs a read by trying to find the value in the memtable and falling back to the
     /// sstables if not successful.
     pub fn read(&self, key: &str) -> Option<Vec<u8>> {
-        let engine = &mut self.db.lock().unwrap();
+        let engine = &mut self.engine.lock().unwrap();
 
         engine.memtable.get(key).map(|v| v.to_vec()).or_else(|| {
             for table in engine.sstables.iter_mut().rev().borrow_mut() {
@@ -191,20 +191,43 @@ impl<'engine> WriteHandler<'engine> {
     /// Inserts a value into the memtable. If the memtable size reaches its threshold, converts it
     /// into a sstable.
     ///
-    /// ISSUES
+    /// TODO:
     /// - the memtable is swapped with an empty one before it is persisted. concurrent readers will
     /// see the storage in a past state state.
     pub fn insert(&mut self, key: String, value: Vec<u8>) -> Result<()> {
-        let mut engine = self.engine.db.lock().unwrap();
+        let mut engine = self.storage.engine.lock().unwrap();
 
         engine.memtable.insert(key, value).unwrap();
 
-        if engine.memtable.len() == self.engine.config.threshold {
-            let path = self.engine.segment_path(engine.seq_logs);
+        if engine.memtable.len() == self.storage.config.threshold {
+            let path = self.storage.segment_path(engine.seq_logs);
 
             let memtable = std::mem::replace(
                 &mut engine.memtable,
-                MemTable::new(&self.engine.config.wal_path).unwrap(),
+                MemTable::new(&self.storage.config.wal_path).unwrap(),
+            );
+
+            memtable.persist(&path)?;
+            let sstable = SSTable::new(path)?;
+
+            engine.sstables.push(sstable);
+            engine.seq_logs += 1;
+        }
+
+        Ok(())
+    }
+
+    pub fn remove(&mut self, key: String) -> Result<()> {
+        let mut engine = self.storage.engine.lock().unwrap();
+
+        engine.memtable.remove(key).unwrap();
+
+        if engine.memtable.len() == self.storage.config.threshold {
+            let path = self.storage.segment_path(engine.seq_logs);
+
+            let memtable = std::mem::replace(
+                &mut engine.memtable,
+                MemTable::new(&self.storage.config.wal_path).unwrap(),
             );
 
             memtable.persist(&path)?;
@@ -220,69 +243,97 @@ impl<'engine> WriteHandler<'engine> {
 
 impl<'engine> Drop for WriteHandler<'engine> {
     fn drop(&mut self) {
-        let lock = self.engine.lock_path();
+        let lock = self.storage.lock_path();
         std::fs::remove_file(lock).unwrap()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::*;
+    use anyhow::Result;
+
+    use crate::{storage::Storage, test_utils::*};
 
     #[test]
-    fn memtable_is_fresh() {
-        let (uuid, mut engine) = setup();
+    fn memtable_is_fresh() -> Result<()> {
+        let test = Test::new()?;
+        let path = test.simple_path();
+        let mut storage = Storage::builder().segments_path(path).build()?;
 
-        let times = engine.config.threshold * 2;
-        inject(&mut engine, times);
+        let times = storage.config.threshold * 2;
+        inject(&mut storage, times);
 
-        let engine = engine.db.lock().unwrap();
+        let engine = storage.engine.lock().unwrap();
 
         assert_eq!(engine.sstables.len(), 2);
         assert_eq!(engine.memtable.len(), 0);
 
-        clean(&uuid);
+        Ok(())
     }
 
     #[test]
-    fn engine_recovers_sstables() {
-        let (uuid, mut engine) = setup();
+    fn engine_recovers_sstables() -> Result<()> {
+        let test = Test::new()?;
+        let path = test.simple_path();
+        let mut storage = Storage::builder().segments_path(path.clone()).build()?;
 
-        let times = engine.config.threshold * 2;
-        inject(&mut engine, times);
+        let times = storage.config.threshold * 2;
+        inject(&mut storage, times);
 
-        let engine = engine_from_uuid(&uuid);
-        let engine = engine.db.lock().unwrap();
+        let storage = Storage::builder().segments_path(path).build()?;
+        let engine = storage.engine.lock().unwrap();
 
         assert_eq!(engine.sstables.len(), 2);
 
-        clean(&uuid);
+        Ok(())
     }
 
     #[test]
-    fn read() {
-        let (uuid, mut engine) = setup();
-        let threshold = engine.config.threshold;
+    fn read() -> Result<()> {
+        let test = Test::new()?;
+        let path = test.simple_path();
+        let mut storage = Storage::builder().segments_path(path.clone()).build()?;
+        let threshold = storage.config.threshold;
 
-        let v1 = engine.read("key-500");
-        let v2 = engine.read("key-1500");
+        let v1 = storage.read("key-500");
+        let v2 = storage.read("key-1500");
         assert_eq!(None, v1);
         assert_eq!(None, v2);
 
-        inject(&mut engine, threshold);
+        inject(&mut storage, threshold);
 
-        let v1 = String::from_utf8(engine.read("key-500").unwrap()).unwrap();
-        let v2 = engine.read("key-1500");
+        let v1 = String::from_utf8(storage.read("key-500").unwrap()).unwrap();
+        let v2 = storage.read("key-1500");
         assert_eq!("value-500", v1);
         assert_eq!(None, v2);
 
-        inject_from(&mut engine, threshold, threshold);
+        inject_from(&mut storage, threshold, threshold);
 
-        let v1 = String::from_utf8(engine.read("key-500").unwrap()).unwrap();
-        let v2 = String::from_utf8(engine.read("key-1500").unwrap()).unwrap();
+        let v1 = String::from_utf8(storage.read("key-500").unwrap()).unwrap();
+        let v2 = String::from_utf8(storage.read("key-1500").unwrap()).unwrap();
         assert_eq!("value-500", v1);
         assert_eq!("value-1500", v2);
 
-        clean(&uuid);
+        Ok(())
+    }
+
+    fn inject(engine: &mut Storage, times: usize) {
+        let mut writer = engine.open_as_writer().unwrap();
+
+        for i in 0..times {
+            let k = format!("key-{}", i);
+            let v = format!("value-{}", i).as_bytes().to_owned();
+            writer.insert(k, v).unwrap();
+        }
+    }
+
+    fn inject_from(engine: &mut Storage, times: usize, start: usize) {
+        let mut writer = engine.open_as_writer().unwrap();
+
+        for i in start..start + times {
+            let k = format!("key-{}", i);
+            let v = format!("value-{}", i).as_bytes().to_owned();
+            writer.insert(k, v).unwrap();
+        }
     }
 }
