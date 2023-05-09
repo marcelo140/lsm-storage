@@ -1,6 +1,7 @@
 use crate::format;
 use crate::memtable::MemTable;
 use crate::sstable::SSTable;
+use crate::storage::Storage;
 use crate::Stored;
 
 use anyhow::Ok;
@@ -47,6 +48,10 @@ impl Test {
         SSTable::new(path)
     }
 
+    pub fn create_storage(&self) -> Result<Storage> {
+        Storage::builder().segments_path(self.test_path()).build()
+    }
+
     pub fn corrupt_wal(&self) -> Result<()> {
         let wal_path = self.wal_path();
         let mut wal = OpenOptions::new().append(true).open(&wal_path)?;
@@ -55,7 +60,7 @@ impl Test {
         Ok(())
     }
 
-    pub fn simple_path(&self) -> PathBuf {
+    pub fn test_path(&self) -> PathBuf {
         self.tempdir.path().to_owned()
     }
 

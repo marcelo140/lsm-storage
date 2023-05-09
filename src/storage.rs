@@ -250,18 +250,19 @@ impl<'engine> Drop for WriteHandler<'engine> {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Range;
+
     use anyhow::Result;
 
     use crate::{storage::Storage, test_utils::*};
 
     #[test]
-    fn memtable_is_fresh() -> Result<()> {
+    fn memtables_are_converted_to_sstables_when_threshold_is_reached() -> Result<()> {
         let test = Test::new()?;
-        let path = test.simple_path();
-        let mut storage = Storage::builder().segments_path(path).build()?;
+        let mut storage = test.create_storage()?;
 
-        let times = storage.config.threshold * 2;
-        inject(&mut storage, times);
+        let number_of_rows = storage.config.threshold * 2;
+        inject_rows(&mut storage, 0..number_of_rows);
 
         let engine = storage.engine.lock().unwrap();
 
@@ -272,27 +273,26 @@ mod tests {
     }
 
     #[test]
-    fn engine_recovers_sstables() -> Result<()> {
+    fn engine_loads_sstables_and_wal_when_it_starts() -> Result<()> {
         let test = Test::new()?;
-        let path = test.simple_path();
-        let mut storage = Storage::builder().segments_path(path.clone()).build()?;
+        let mut storage = test.create_storage()?;
 
-        let times = storage.config.threshold * 2;
-        inject(&mut storage, times);
+        let number_of_rows = storage.config.threshold * 2;
+        inject_rows(&mut storage, 0..number_of_rows);
 
-        let storage = Storage::builder().segments_path(path).build()?;
+        let storage = test.create_storage()?;
         let engine = storage.engine.lock().unwrap();
 
         assert_eq!(engine.sstables.len(), 2);
+        assert_eq!(engine.memtable.len(), 0); // TODO: We have no guarantee that the WAL was flushed to disk so there might be data missing.
 
         Ok(())
     }
 
     #[test]
-    fn read() -> Result<()> {
+    fn reads_from_memtable_and_sstable() -> Result<()> {
         let test = Test::new()?;
-        let path = test.simple_path();
-        let mut storage = Storage::builder().segments_path(path.clone()).build()?;
+        let mut storage = test.create_storage()?;
         let threshold = storage.config.threshold;
 
         let v1 = storage.read("key-500");
@@ -300,14 +300,14 @@ mod tests {
         assert_eq!(None, v1);
         assert_eq!(None, v2);
 
-        inject(&mut storage, threshold);
+        inject_rows(&mut storage, 0..threshold);
 
         let v1 = String::from_utf8(storage.read("key-500").unwrap()).unwrap();
         let v2 = storage.read("key-1500");
         assert_eq!("value-500", v1);
         assert_eq!(None, v2);
 
-        inject_from(&mut storage, threshold, threshold);
+        inject_rows(&mut storage, threshold..threshold*2);
 
         let v1 = String::from_utf8(storage.read("key-500").unwrap()).unwrap();
         let v2 = String::from_utf8(storage.read("key-1500").unwrap()).unwrap();
@@ -317,20 +317,10 @@ mod tests {
         Ok(())
     }
 
-    fn inject(engine: &mut Storage, times: usize) {
+    fn inject_rows(engine: &mut Storage, range_of_keys: Range<usize>) {
         let mut writer = engine.open_as_writer().unwrap();
 
-        for i in 0..times {
-            let k = format!("key-{}", i);
-            let v = format!("value-{}", i).as_bytes().to_owned();
-            writer.insert(k, v).unwrap();
-        }
-    }
-
-    fn inject_from(engine: &mut Storage, times: usize, start: usize) {
-        let mut writer = engine.open_as_writer().unwrap();
-
-        for i in start..start + times {
+        for i in range_of_keys {
             let k = format!("key-{}", i);
             let v = format!("value-{}", i).as_bytes().to_owned();
             writer.insert(k, v).unwrap();
