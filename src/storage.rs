@@ -1,8 +1,11 @@
 use std::borrow::BorrowMut;
-use std::fs::OpenOptions;
+use std::fs::{OpenOptions, read};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::thread::JoinHandle;
 
+use crate::compactor::start_compaction;
 use crate::engine::Engine;
 use crate::memtable::MemTable;
 use crate::sstable::SSTable;
@@ -24,9 +27,10 @@ struct Config {
 /// The engine and its configuration. Why isn't the configuration inside the engine itself?
 /// Maybe because it's read-only.
 #[derive(Clone)]
-pub struct Storage {
+pub struct Storage{
     engine: Arc<Mutex<Engine>>,
     config: Arc<Config>,
+    compactor: Arc<JoinHandle<()>>,
 }
 
 pub struct StorageBuilder {
@@ -73,19 +77,29 @@ impl StorageBuilder {
     pub fn build(self) -> Result<Storage> {
         std::fs::create_dir_all(&self.config.segments_path)?;
 
-        let sstables = self.find_sstables()?;
-        let seq_logs = sstables.len();
+        let sstables0 = self.find_sstables()?;
+        let sstable_readers0 = sstables0.iter().flat_map(|sstable| sstable.reader()).collect();
+        let seq_logs = sstables0.len();
         let memtable = self.bootstrap_memtable()?;
 
-        let engine = Engine {
-            sstables,
+        let engine = Arc::new(Mutex::new(Engine {
+            sstables0,
+            sstables1: Vec::new(),
+            sstable_readers0,
+            sstable_readers1: Vec::new(),
             seq_logs,
             memtable,
-        };
+        }));
+
+        let compactor_engine = engine.clone();
+        let compactor_thread = thread::spawn(move || {
+            start_compaction(compactor_engine);
+        });
 
         Ok(Storage {
             config: Arc::new(self.config),
-            engine: Arc::new(Mutex::new(engine)),
+            engine,
+            compactor: Arc::new(compactor_thread),
         })
     }
 
@@ -115,7 +129,7 @@ impl StorageBuilder {
 
         sstables.sort_by_key(|t| t.0);
 
-        Ok(sstables.into_iter().flat_map(|t| t.1).collect())
+        Ok(sstables.into_iter().map(|t| t.1).collect())
     }
 }
 
@@ -174,7 +188,7 @@ impl Storage {
         let engine = &mut self.engine.lock().unwrap();
 
         engine.memtable.get(key).map(|v| v.to_vec()).or_else(|| {
-            for table in engine.sstables.iter_mut().rev().borrow_mut() {
+            for table in engine.sstable_readers0.iter_mut().rev().borrow_mut() {
                 let v = table.get(key).unwrap();
 
                 if v.is_some() {
@@ -208,9 +222,11 @@ impl<'engine> WriteHandler<'engine> {
             );
 
             memtable.persist(&path)?;
-            let sstable = SSTable::new(path)?;
+            let sstable = SSTable::new(path);
+            let reader = sstable.reader()?;
 
-            engine.sstables.push(sstable);
+            engine.sstables0.push(sstable);
+            engine.sstable_readers0.push(reader);
             engine.seq_logs += 1;
         }
 
@@ -231,9 +247,11 @@ impl<'engine> WriteHandler<'engine> {
             );
 
             memtable.persist(&path)?;
-            let sstable = SSTable::new(path)?;
+            let sstable = SSTable::new(path);
+            let reader = sstable.reader()?;
 
-            engine.sstables.push(sstable);
+            engine.sstables0.push(sstable);
+            engine.sstable_readers0.push(reader);
             engine.seq_logs += 1;
         }
 
@@ -266,7 +284,7 @@ mod tests {
 
         let engine = storage.engine.lock().unwrap();
 
-        assert_eq!(engine.sstables.len(), 2);
+        assert_eq!(engine.sstables0.len(), 2);
         assert_eq!(engine.memtable.len(), 0);
 
         Ok(())
@@ -283,7 +301,7 @@ mod tests {
         let storage = test.create_storage()?;
         let engine = storage.engine.lock().unwrap();
 
-        assert_eq!(engine.sstables.len(), 2);
+        assert_eq!(engine.sstables0.len(), 2);
         assert_eq!(engine.memtable.len(), 0); // TODO: We have no guarantee that the WAL was flushed to disk so there might be data missing.
 
         Ok(())

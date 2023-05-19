@@ -5,6 +5,7 @@ mod engine;
 mod format;
 mod memtable;
 mod sstable;
+mod compactor;
 pub mod storage;
 
 use serde::{Deserialize, Serialize};

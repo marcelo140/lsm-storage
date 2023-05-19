@@ -45,7 +45,7 @@ impl Test {
             format::write_entry(&mut fd, key, value)?;
         }
 
-        SSTable::new(path)
+        Ok(SSTable::new(path))
     }
 
     pub fn create_storage(&self) -> Result<Storage> {

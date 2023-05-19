@@ -10,18 +10,27 @@ use std::path::PathBuf;
 ///
 /// Upon initialization, all entries are read to build an index with the offset for each key. This
 /// allows for quick reads into the log by seeking directly into the correct offset.
+#[derive(Clone)]
 pub struct SSTable {
+    path: PathBuf,
+}
+
+pub struct SSTableReader {
     fd: File,
     indexes: HashMap<String, u64>,
 }
 
 impl SSTable {
     /// Initializes a SSTable for the provided path and scans the log to build the in-memory index.
-    pub fn new(path: PathBuf) -> Result<Self> {
-        let fd = File::open(path)?;
+    pub fn new(path: PathBuf) -> Self {
+        SSTable { path }
+    }
+
+    pub fn reader(&self) -> Result<SSTableReader> {
+        let fd = File::open(&self.path)?;
         let indexes = SSTable::build_index_table(&fd)?;
 
-        Ok(SSTable { fd, indexes })
+        Ok(SSTableReader { fd, indexes })
     }
 
     fn build_index_table(fd: &File) -> Result<HashMap<String, u64>> {
@@ -38,28 +47,10 @@ impl SSTable {
         Ok(indexes)
     }
 
-    /// Returns the value for the provided key if it is stored in the SSTable.
-    pub fn get(&mut self, key: &str) -> Result<Option<Vec<u8>>> {
-        // TODO: this shouldn't need to be mutable
-        let value_position = &self.indexes.get(key);
-
-        if value_position.is_none() {
-            return Ok(None);
-        }
-
-        self.fd.seek(SeekFrom::Start(*value_position.unwrap()))?;
-        let (_key, value) = format::read_entry(&self.fd)?.unwrap();
-
-        match value {
-            Stored::Value(v) => Ok(Some(v)),
-            Stored::Tombstone => Ok(None),
-        }
-    }
-
     pub(crate) fn merge(
         path: PathBuf,
-        old_sstable: &mut SSTable,
-        new_sstable: &mut SSTable,
+        old_sstable: &mut SSTableReader,
+        new_sstable: &mut SSTableReader,
     ) -> Result<SSTable> {
         old_sstable.fd.rewind()?;
         new_sstable.fd.rewind()?;
@@ -98,7 +89,27 @@ impl SSTable {
             new_entry = format::read_entry(&new_sstable.fd)?;
         }
 
-        SSTable::new(path)
+        Ok(SSTable::new(path))
+    }
+}
+
+impl SSTableReader {
+    /// Returns the value for the provided key if it is stored in the SSTable.
+    pub fn get(&mut self, key: &str) -> Result<Option<Vec<u8>>> {
+        // TODO: this shouldn't need to be mutable
+        let value_position = &self.indexes.get(key);
+
+        if value_position.is_none() {
+            return Ok(None);
+        }
+
+        self.fd.seek(SeekFrom::Start(*value_position.unwrap()))?;
+        let (_key, value) = format::read_entry(&self.fd)?.unwrap();
+
+        match value {
+            Stored::Value(v) => Ok(Some(v)),
+            Stored::Tombstone => Ok(None),
+        }
     }
 }
 
@@ -123,28 +134,29 @@ mod tests {
         ];
 
         test.generate_sstable("table", &contents)?;
-        let mut sstable = SSTable::new(sstable_path)?;
-        let index1 = sstable.indexes.get("key-1").unwrap();
-        let index2 = sstable.indexes.get("key-2").unwrap();
-        let index3 = sstable.indexes.get("key-3").unwrap();
+        let sstable = SSTable::new(sstable_path);
+        let mut sstable_reader = sstable.reader()?;
+        let index1 = sstable_reader.indexes.get("key-1").unwrap();
+        let index2 = sstable_reader.indexes.get("key-2").unwrap();
+        let index3 = sstable_reader.indexes.get("key-3").unwrap();
 
         assert_eq!(contents.len(), 3);
 
-        sstable.fd.seek(SeekFrom::Start(*index1))?;
+        sstable_reader.fd.seek(SeekFrom::Start(*index1))?;
         assert_eq!(
-            format::read_entry(&sstable.fd)?.unwrap(),
+            format::read_entry(&sstable_reader.fd)?.unwrap(),
             ("key-1".to_owned(), Stored::Value(b"value-1".to_vec()))
         );
 
-        sstable.fd.seek(SeekFrom::Start(*index2))?;
+        sstable_reader.fd.seek(SeekFrom::Start(*index2))?;
         assert_eq!(
-            format::read_entry(&sstable.fd)?.unwrap(),
+            format::read_entry(&sstable_reader.fd)?.unwrap(),
             ("key-2".to_owned(), Stored::Value(b"value-2".to_vec()))
         );
 
-        sstable.fd.seek(SeekFrom::Start(*index3))?;
+        sstable_reader.fd.seek(SeekFrom::Start(*index3))?;
         assert_eq!(
-            format::read_entry(&sstable.fd)?.unwrap(),
+            format::read_entry(&sstable_reader.fd)?.unwrap(),
             ("key-3".to_owned(), Stored::Value(b"value-3".to_vec()))
         );
 
@@ -155,7 +167,7 @@ mod tests {
     fn get_should_return_expected_value() -> Result<()> {
         let test = Test::new()?;
 
-        let mut sstable = test.generate_sstable(
+        let sstable = test.generate_sstable(
             "table",
             &vec![
                 ("key-1".to_owned(), Stored::Value(b"value-1".to_vec())),
@@ -163,8 +175,9 @@ mod tests {
                 ("key-3".to_owned(), Stored::Value(b"value-3".to_vec())),
             ],
         )?;
+        let mut sstable_reader = sstable.reader()?;
 
-        let value = sstable.get("key-1")?;
+        let value = sstable_reader.get("key-1")?;
         assert!(value.is_some());
 
         let deserialized_value = String::from_utf8(value.unwrap())?;
@@ -177,7 +190,7 @@ mod tests {
     fn merging_should_write_in_order_and_merge_all_elements() -> Result<()> {
         let test = Test::new()?;
 
-        let mut old_sstable = test.generate_sstable(
+        let old_sstable = test.generate_sstable(
             "table1",
             &vec![
                 ("key-1".to_owned(), Stored::Value(b"value-1".to_vec())),
@@ -187,7 +200,7 @@ mod tests {
             ],
         )?;
 
-        let mut new_sstable = test.generate_sstable(
+        let new_sstable = test.generate_sstable(
             "table2",
             &vec![
                 ("key-1".to_owned(), Stored::Value(b"value-5".to_vec())),
@@ -197,7 +210,7 @@ mod tests {
         )?;
 
         let sstable_path = test.sstable_path("merged-table");
-        SSTable::merge(sstable_path.clone(), &mut old_sstable, &mut new_sstable)?;
+        SSTable::merge(sstable_path.clone(), &mut old_sstable.reader()?, &mut new_sstable.reader()?)?;
 
         let fd = File::open(sstable_path)?;
 
