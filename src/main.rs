@@ -40,8 +40,7 @@ async fn kv_insert(
     Path(key): Path<String>,
     body: String,
 ) -> Result<(), StatusCode> {
-    let mut writer = storage.open_as_writer().unwrap();
-    writer.insert(key, body.into_bytes()).unwrap();
+    storage.insert(key, body.into_bytes()).unwrap();
 
     Ok(())
 }
@@ -50,8 +49,7 @@ async fn kv_delete(
     State(mut storage): State<Storage>,
     Path(key): Path<String>
 ) -> Result<(), StatusCode> {
-    let mut writer = storage.open_as_writer().unwrap();
-    writer.remove(key).unwrap();
+    storage.remove(key).unwrap();
 
     Ok(())
 }

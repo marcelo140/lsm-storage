@@ -4,13 +4,14 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Seek, SeekFrom};
+use std::path::Path;
 use std::path::PathBuf;
 
 /// A data structure that allows read-only access into an ordered set of <key, value> pairs persisted on-disk.
 ///
 /// Upon initialization, all entries are read to build an index with the offset for each key. This
 /// allows for quick reads into the log by seeking directly into the correct offset.
-#[derive(Clone)]
+#[derive(PartialEq, Eq, Clone)]
 pub struct SSTable {
     path: PathBuf,
 }
@@ -22,8 +23,8 @@ pub struct SSTableReader {
 
 impl SSTable {
     /// Initializes a SSTable for the provided path and scans the log to build the in-memory index.
-    pub fn new(path: PathBuf) -> Self {
-        SSTable { path }
+    pub fn new(path: &Path) -> Self {
+        SSTable { path: path.to_path_buf() }
     }
 
     pub fn reader(&self) -> Result<SSTableReader> {
@@ -57,6 +58,7 @@ impl SSTable {
 
         let mut old_entry = format::read_entry(&old_sstable.fd)?;
         let mut new_entry = format::read_entry(&new_sstable.fd)?;
+        
         let mut fd = File::create(&path)?;
 
         while let Some(((old_key, old_value), (new_key, new_value))) =
@@ -89,7 +91,7 @@ impl SSTable {
             new_entry = format::read_entry(&new_sstable.fd)?;
         }
 
-        Ok(SSTable::new(path))
+        Ok(SSTable { path })
     }
 }
 
@@ -134,7 +136,7 @@ mod tests {
         ];
 
         test.generate_sstable("table", &contents)?;
-        let sstable = SSTable::new(sstable_path);
+        let sstable = SSTable::new(&sstable_path);
         let mut sstable_reader = sstable.reader()?;
         let index1 = sstable_reader.indexes.get("key-1").unwrap();
         let index2 = sstable_reader.indexes.get("key-2").unwrap();

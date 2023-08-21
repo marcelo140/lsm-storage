@@ -22,9 +22,35 @@ where
     Ok(())
 }
 
+pub(crate) fn write_memtable_header<W>(writer: &mut W, id: usize) -> Result<()>
+where
+    W: std::io::Write,
+{
+    bincode::serialize_into(writer, &id)?;
+    Ok(())
+}
+
+pub(crate) fn read_memtable_header<R>(reader: R) -> Result<Option<usize>>
+where
+    R: std::io::Read,
+{
+    match bincode::deserialize_from::<_, usize>(reader) {
+        Ok(entry) => Ok(Some(entry)),
+        Err(error) if reached_eof(&error) => Ok(None),
+        Err(error) => bail!(error),
+    }
+}
+
+pub(crate) fn memtable_metadata_size(metadata: usize) -> Result<u64> {
+    Ok(bincode::serialized_size(&metadata)?)
+}
+
 pub(crate) fn entry_size(entry: &(String, Stored)) -> Result<u64> {
-    let size = bincode::serialized_size(&entry).unwrap();
-    Ok(size)
+    Ok(bincode::serialized_size(&entry)?)
+}
+
+pub(crate) fn entry_size_kv(key: &str, value: &Stored) -> Result<usize> {
+    Ok(bincode::serialized_size(&(key, value))? as usize)
 }
 
 fn reached_eof(error: &ErrorKind) -> bool {

@@ -1,35 +1,37 @@
 use std::borrow::BorrowMut;
-use std::fs::{OpenOptions, read};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::path::{PathBuf, Path};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::thread::JoinHandle;
 
+use crate::{SEGMENTS_NAME, WAL_NAME, memtable};
 use crate::compactor::start_compaction;
 use crate::engine::Engine;
 use crate::memtable::MemTable;
 use crate::sstable::SSTable;
 
 use anyhow::Result;
+use tokio::sync::mpsc::UnboundedSender;
 
 /// Defines the configuration for the storage necessary to handle sstables.
-struct Config {
+#[derive(Clone)]
+pub(crate) struct Config {
     /// The path where the segments are stored.
     segments_path: PathBuf,
-    /// The path where the segments are stored.
+    /// The path where the WALs are stored.
     wal_path: PathBuf,
-    /// The pattern for the segments name.
-    segments_name: String,
     /// The size at which a memtable is converted into a sstable.
-    threshold: usize,
+    pub threshold: usize,
 }
 
 /// The engine and its configuration. Why isn't the configuration inside the engine itself?
 /// Maybe because it's read-only.
 #[derive(Clone)]
 pub struct Storage{
-    engine: Arc<Mutex<Engine>>,
-    config: Arc<Config>,
+    pub(crate) engine: Arc<Mutex<Engine>>,
+    pub(crate) config: Config,
+    persistence_sender: tokio::sync::mpsc::UnboundedSender<String>,
+    sequence_number: usize,
     compactor: Arc<JoinHandle<()>>,
 }
 
@@ -40,90 +42,118 @@ pub struct StorageBuilder {
 /// Builder to create the storage.
 impl StorageBuilder {
     pub fn new() -> Self {
-        let mut path = PathBuf::new();
-        path.push(".");
+        let mut current_path = PathBuf::new();
+        current_path.push(".");
+
+        let mut segments_path = current_path.clone();
+        segments_path.push(SEGMENTS_NAME);
+
+        let mut wal_path = current_path;
+        wal_path.push(WAL_NAME);
 
         StorageBuilder {
             config: Config {
-                segments_path: path.clone(),
-                wal_path: path,
-                segments_name: "seg-logs".to_owned(),
+                segments_path,
+                wal_path,
                 threshold: 1024,
             },
         }
     }
 
     pub fn segments_path(mut self, segments_path: PathBuf) -> Self {
-        // TODO: this shouldn't be here but just hacking away for now
-        let mut wal_path = segments_path.clone();
-        wal_path.push("memtable_wal");
-
         self.config.segments_path = segments_path;
+
+        self
+    }
+
+    pub fn wal_path(mut self, wal_path: PathBuf) -> Self {
         self.config.wal_path = wal_path;
 
         self
     }
 
-    pub fn segments_name(mut self, segments_name: String) -> Self {
-        self.config.segments_name = segments_name;
-        self
-    }
-
     /// Builds the storage.
-    /// - ensures the directory where the segments will be stored exists
+    /// - ensures the directory where the sstables and WALs will be stored exists
     /// - builds a vector of sstables based on the files on that directory that match the segment
     /// name
     /// - creates an empty memtable
     pub fn build(self) -> Result<Storage> {
         std::fs::create_dir_all(&self.config.segments_path)?;
+        std::fs::create_dir_all(&self.config.wal_path)?;
 
-        let sstables0 = self.find_sstables()?;
+        let sstables0 = self.load_sstables()?;
         let sstable_readers0 = sstables0.iter().flat_map(|sstable| sstable.reader()).collect();
-        let seq_logs = sstables0.len();
-        let memtable = self.bootstrap_memtable()?;
+        let (active_memtable, memtables) = self.load_memtables()?;
 
         let engine = Arc::new(Mutex::new(Engine {
             sstables0,
             sstables1: Vec::new(),
             sstable_readers0,
             sstable_readers1: Vec::new(),
-            seq_logs,
-            memtable,
+            active_memtable,
+            memtables,
         }));
+
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
 
         let compactor_engine = engine.clone();
         let compactor_thread = thread::spawn(move || {
-            start_compaction(compactor_engine);
+            start_compaction(compactor_engine, receiver);
         });
 
         Ok(Storage {
-            config: Arc::new(self.config),
+            config: self.config,
             engine,
+            persistence_sender: sender,
             compactor: Arc::new(compactor_thread),
+            sequence_number: 0,
         })
     }
 
-    fn bootstrap_memtable(&self) -> Result<MemTable> {
-        if self.config.wal_path.exists() {
-            MemTable::recover(&self.config.wal_path)
-        } else {
-            MemTable::new(&self.config.wal_path)
+    fn load_memtables(&self) -> Result<(MemTable, Vec<Arc<MemTable>>)> {
+        let mut memtables = Vec::new();
+
+        for entry in std::fs::read_dir(&self.config.wal_path)? {
+            let path = entry?.path();
+            let filename = path.file_name().unwrap().to_str().unwrap();
+
+            if filename.starts_with(WAL_NAME) {
+                let memtable = MemTable::recover(&path)?;
+                memtables.push(memtable);
+            }
+        }
+    
+        memtables.sort_by_key(|t| t.id);
+        let memtable = memtables.pop();
+    
+        match memtable {
+            None => {
+                let mut wal_path = self.config.wal_path.clone();
+                wal_path.push(format!("{}-{}", WAL_NAME, 0));
+
+                let memtable = MemTable::new(0, &wal_path)?;
+                Ok((memtable, vec![]))
+            }
+            Some(memtable) => {
+                let memtables = memtables.into_iter().map(|t| Arc::new(t)).collect();
+                Ok((memtable, memtables))
+            }
         }
     }
 
     // TODO: a sstable may be corrupted due to a crash while being written. Fix this later.
-    fn find_sstables(&self) -> Result<Vec<SSTable>> {
+    fn load_sstables(&self) -> Result<Vec<SSTable>> {
         let mut sstables = Vec::new();
 
         for entry in std::fs::read_dir(&self.config.segments_path)? {
             let path = entry?.path();
             let filename = path.file_name().unwrap().to_str().unwrap();
 
-            if filename.starts_with(&self.config.segments_name) {
+            if filename.starts_with(SEGMENTS_NAME) {
                 let id = filename.rsplit('-').next().unwrap();
                 let id: usize = id.parse()?;
 
-                sstables.push((id, SSTable::new(path)));
+                sstables.push((id, SSTable::new(&path)));
             }
         }
 
@@ -139,11 +169,6 @@ impl Default for StorageBuilder {
     }
 }
 
-/// A borrow of the storage that allows writing.
-pub struct WriteHandler<'engine> {
-    storage: &'engine mut Storage,
-}
-
 impl Storage {
     pub fn builder() -> StorageBuilder {
         StorageBuilder::new()
@@ -153,33 +178,12 @@ impl Storage {
         StorageBuilder::new().build()
     }
 
-    fn lock_path(&self) -> PathBuf {
-        let mut path = PathBuf::new();
-        path.push(&self.config.segments_path);
-        path.push("lock");
-
-        path
-    }
-
     fn segment_path(&self, seg_id: usize) -> PathBuf {
         let mut path = PathBuf::new();
         path.push(&self.config.segments_path);
-        path.push(format!("{}-{}", &self.config.segments_name, seg_id));
+        path.push(format!("{}-{}", SEGMENTS_NAME, seg_id));
 
         path
-    }
-
-    /// Creates the lock file to avoid other engines writing concurrently and returns
-    /// a WriteHandler.
-    pub fn open_as_writer(&mut self) -> Result<WriteHandler> {
-        let lock = self.lock_path();
-
-        OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(lock)
-            .map(move |_| WriteHandler { storage: self })
-            .map_err(From::from)
     }
 
     /// Performs a read by trying to find the value in the memtable and falling back to the
@@ -187,21 +191,24 @@ impl Storage {
     pub fn read(&self, key: &str) -> Option<Vec<u8>> {
         let engine = &mut self.engine.lock().unwrap();
 
-        engine.memtable.get(key).map(|v| v.to_vec()).or_else(|| {
-            for table in engine.sstable_readers0.iter_mut().rev().borrow_mut() {
-                let v = table.get(key).unwrap();
+        engine.memtables
+            .iter()
+            .rev()
+            .find_map(|memtable| memtable.get(key))
+            .map(|v| v.to_vec())
+            .or_else(|| {
+                for table in engine.sstable_readers0.iter_mut().rev().borrow_mut() {
+                    let v = table.get(key).unwrap();
 
-                if v.is_some() {
-                    return v;
+                    if v.is_some() {
+                        return v;
+                    }
                 }
-            }
 
-            None
-        })
+                None
+            })
     }
-}
 
-impl<'engine> WriteHandler<'engine> {
     /// Inserts a value into the memtable. If the memtable size reaches its threshold, converts it
     /// into a sstable.
     ///
@@ -209,61 +216,41 @@ impl<'engine> WriteHandler<'engine> {
     /// - the memtable is swapped with an empty one before it is persisted. concurrent readers will
     /// see the storage in a past state state.
     pub fn insert(&mut self, key: String, value: Vec<u8>) -> Result<()> {
-        let mut engine = self.storage.engine.lock().unwrap();
+        let mut engine = self.engine.lock().unwrap();
 
-        engine.memtable.insert(key, value).unwrap();
+        engine.active_memtable.insert(key, value).unwrap();
 
-        if engine.memtable.len() == self.storage.config.threshold {
-            let path = self.storage.segment_path(engine.seq_logs);
-
-            let memtable = std::mem::replace(
-                &mut engine.memtable,
-                MemTable::new(&self.storage.config.wal_path).unwrap(),
-            );
-
-            memtable.persist(&path)?;
-            let sstable = SSTable::new(path);
-            let reader = sstable.reader()?;
-
-            engine.sstables0.push(sstable);
-            engine.sstable_readers0.push(reader);
-            engine.seq_logs += 1;
+        if engine.active_memtable.len() == self.config.threshold {
+            Storage::replace_memtable(&self.persistence_sender, &mut self.sequence_number, &mut engine, &self.config.wal_path)?;
+            self.persistence_sender.send("message".to_string())?;
         }
 
         Ok(())
     }
 
     pub fn remove(&mut self, key: String) -> Result<()> {
-        let mut engine = self.storage.engine.lock().unwrap();
+        let mut engine = self.engine.lock().unwrap();
 
-        engine.memtable.remove(key).unwrap();
+        engine.active_memtable.remove(key).unwrap();
 
-        if engine.memtable.len() == self.storage.config.threshold {
-            let path = self.storage.segment_path(engine.seq_logs);
-
-            let memtable = std::mem::replace(
-                &mut engine.memtable,
-                MemTable::new(&self.storage.config.wal_path).unwrap(),
-            );
-
-            memtable.persist(&path)?;
-            let sstable = SSTable::new(path);
-            let reader = sstable.reader()?;
-
-            engine.sstables0.push(sstable);
-            engine.sstable_readers0.push(reader);
-            engine.seq_logs += 1;
+        if engine.active_memtable.len() == self.config.threshold {
+            Storage::replace_memtable(&self.persistence_sender, &mut self.sequence_number, &mut engine, &self.config.wal_path)?;
         }
 
         Ok(())
     }
-}
 
-impl<'engine> Drop for WriteHandler<'engine> {
-    fn drop(&mut self) {
-        let lock = self.storage.lock_path();
-        std::fs::remove_file(lock).unwrap()
+    fn replace_memtable(sender: &UnboundedSender<String>, sequence_number: &mut usize, engine: &mut MutexGuard<Engine>, path: &Path) -> Result<()> {
+        *sequence_number += 1;
+        let new_memtable = MemTable::new(*sequence_number, &path)?;
+        let old_memtable = std::mem::replace(&mut engine.active_memtable, new_memtable);
+        engine.memtables.push(Arc::new(old_memtable));
+
+        sender.send("message".to_string())?;
+
+        Ok(())
     }
+
 }
 
 #[cfg(test)]

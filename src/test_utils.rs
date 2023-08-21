@@ -1,3 +1,4 @@
+use crate::engine::Engine;
 use crate::format;
 use crate::memtable::MemTable;
 use crate::sstable::SSTable;
@@ -30,7 +31,7 @@ impl Test {
     pub fn create_memtable(&self) -> Result<MemTable> {
         let wal_path = self.wal_path();
 
-        Ok(MemTable::new(&wal_path)?)
+        Ok(MemTable::new(0, &wal_path)?)
     }
 
     pub(crate) fn generate_sstable(
@@ -45,7 +46,7 @@ impl Test {
             format::write_entry(&mut fd, key, value)?;
         }
 
-        Ok(SSTable::new(path))
+        Ok(SSTable::new(&path))
     }
 
     pub fn create_storage(&self) -> Result<Storage> {
@@ -83,5 +84,16 @@ impl Test {
         sstable_path.push(format!("{}-{}", SSTABLE_PATH, name));
 
         sstable_path
+    }
+
+    pub fn inject_data(storage: &mut Storage, amount: usize) -> Result<()> {
+        let mut writer = storage.open_as_writer()?;
+
+        for i in 0..amount {
+            let key = format!("key-{i}");
+            writer.insert(key, "value".as_bytes().to_owned())?;
+        }
+
+        Ok(())
     }
 }

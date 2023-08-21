@@ -1,5 +1,6 @@
 use crate::format;
 use crate::Stored;
+use crate::sstable::SSTable;
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -20,6 +21,7 @@ use std::path::{Path, PathBuf};
 /// SSTable and thus cannot be simply removed. This is why we insert a Tombstone in remove
 /// operations.
 pub struct MemTable {
+    pub id: usize,
     pub(crate) tree: BTreeMap<String, Stored>,
     wal_path: PathBuf,
     wal: File,
@@ -27,10 +29,11 @@ pub struct MemTable {
 
 impl MemTable {
     /// Creates an empty MemTable.
-    pub fn new(wal_path: &Path) -> Result<Self> {
-        let wal = MemTable::create_wal(wal_path)?;
+    pub fn new(id: usize, wal_path: &Path) -> Result<Self> {
+        let wal = MemTable::create_wal(id, wal_path)?;
 
         Ok(MemTable {
+            id,
             tree: BTreeMap::new(),
             wal_path: wal_path.to_path_buf(),
             wal,
@@ -40,9 +43,10 @@ impl MemTable {
     /// Creates a MemTable from a write-ahead-log
     pub fn recover(wal_path: &Path) -> Result<Self> {
         let wal = MemTable::open_wal(wal_path)?;
+        let id = format::read_memtable_header(&wal)?.unwrap();
 
         let mut tree = BTreeMap::new();
-        let mut bytes_read = 0;
+        let mut bytes_read = format::memtable_metadata_size(id)?;
 
         while let Ok(Some(deserialized_value)) = format::read_entry(&wal) {
             bytes_read += format::entry_size(&deserialized_value)?;
@@ -52,6 +56,7 @@ impl MemTable {
         wal.set_len(bytes_read)?;
 
         Ok(MemTable {
+            id,
             tree,
             wal_path: wal_path.to_path_buf(),
             wal,
@@ -96,26 +101,29 @@ impl MemTable {
     /// Persists the MemTable to disk storing its entries in-order.
     ///
     /// Returns the corresponding SSTable.
-    pub fn persist(self, path: &Path) -> Result<()> {
+    pub fn persist(&self, path: &Path) -> Result<SSTable> {
         let mut fd = File::create(path)?;
 
-        let kvs: Vec<(String, Stored)> = self.tree.into_iter().collect();
+        let kvs: Vec<(String, Stored)> = self.tree.clone().into_iter().collect();
         for (key, value) in kvs {
             format::write_entry(&mut fd, &key, &value)?;
         }
         fd.flush()?;
 
-        std::fs::remove_file(self.wal_path)?;
+        std::fs::remove_file(self.wal_path.to_owned())?;
 
-        Ok(())
+        Ok(SSTable::new(path))
     }
 
-    fn create_wal(path: &Path) -> std::io::Result<File> {
-        OpenOptions::new()
+    fn create_wal(id: usize, path: &Path) -> Result<File> {
+        let mut f = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
-            .open(path)
+            .open(path)?;
+
+        format::write_memtable_header(&mut f, id)?;
+        Ok(f)
     }
 
     fn open_wal(path: &Path) -> std::io::Result<File> {
