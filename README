@@ -1,0 +1,65 @@
+# Current project status
+
+## MemTable
+1.1. inserts OK
+1.2. removes OK
+1.3. lookup OK
+1.4. recover from WAL OK
+    - need to handle WALs that didn't finish creating during recovery
+1.5. persist to sstable OK
+
+## SSTable
+1.1. lookup OK
+1.2. index OK
+    - need to make it sparse
+1.3. merge OK
+
+## LSM Tree
+1.1. insert OK
+1.2. remove OK
+1.3. lookup OK
+
+# Next steps
+
+## Manage transformation of memtables into sstables
+
+I need to keep track of existing memtables, sstables and their status.
+memtable status: ACTIVE, PERSISTING, PERSISTED, DELETED
+sstable status: CREATING, ACTIVE, MERGING, MERGED, DELETED
+
+There should only be 1 ACTIVE memtable at a time.
+Writes are performed against the ACTIVE memtable.
+Lookups are performed against ACTIVE and PERSISTING memtables, and then against
+ACTIVE and MERGING SSTables.
+Upon a 1MB size threshold, memtable should go from ACTIVE to PERSISTING and a new
+ACTIVE memtable should be created.
+PERSISTING should happen a background thread. Once PERSISTING finishes, status
+changes to PERSISTED.
+When status of the memtable changes to PERSISTED, the corresponding SSTable should
+change from CREATING to ACTIVE atomically.
+From time to time, compaction will occur, picking two SSTables and changing their
+status to MERGING. This compaction will result in a new SSTable in status CREATING.
+When compaction ends, the original SSTables should go from MERGING to MERGED
+atomically and the new SSTable should go from CREATING to ACTIVE.
+
+A WAL needs to exist to track these changes in the LSM structure.
+Creating ACTIVE memtable appends to the WAL with action CREATING-MEMTABLE {id}, and then CREATED-MEMTABLE {id}
+Persisting memtable appends to WAL with action PERSISTING-MEMTABLE {id}.
+When persisting ends, it's written to WAL PERSISTED-MEMTABLE {id}.
+This shold be followed by DELETED-MEMTABLE-WAL {id} once the WAL is deleted.
+
+When recovering the LSM Tree, CREATING-MEMTABLE {id} means we should recreate the 
+last memtable.
+When recovering the LSM Tree, PERSISTING-MEMTABLE {id} means we should restart the persisting of memtable. Memtable should be loaded as PERSISTING.
+When recovering the LSM Tree, PERSISTED-MEMTABLE {id} means we delete the WAL associated with that memtable. Memtable {id} does not need to be loaded. SSTable {id} should be loaded.
+When recovering the LSM Tree, DELETED-MEMTABLE {id} means we should load SSTable {id} as ACTIVE.
+
+Starting compaction of SSTables should append MERGING-SSTABLE {id1} {id2} {new-id}.
+Finishing compaction should append MERGED-SSTABLE {id1} {id2} {new-id}.
+Deleting SSTable should append DELETED-SSTABLE {id}
+
+When recovering the LSM Tree, MERGING-SSTABLE {id1} {id2} {new-id} should restart the merging process. {id1} and {id2} should be loaded as 
+
+LSM Tree state
+MemTables: {id, MemTableStatus}
+SSTable: {id, SSTableStatus}

@@ -1,8 +1,8 @@
-use crate::engine::Engine;
 use crate::format;
+use crate::lsm_tree::Engine;
 use crate::memtable::MemTable;
 use crate::sstable::SSTable;
-use crate::storage::Storage;
+use crate::storage::LsmTreeService;
 use crate::Stored;
 
 use anyhow::Ok;
@@ -31,7 +31,7 @@ impl Test {
     pub fn create_memtable(&self) -> Result<MemTable> {
         let wal_path = self.wal_path();
 
-        Ok(MemTable::new(0, &wal_path)?)
+        Ok(MemTable::new(&wal_path)?)
     }
 
     pub(crate) fn generate_sstable(
@@ -49,8 +49,10 @@ impl Test {
         Ok(SSTable::new(&path))
     }
 
-    pub fn create_storage(&self) -> Result<Storage> {
-        Storage::builder().segments_path(self.test_path()).build()
+    pub fn create_storage(&self) -> Result<LsmTreeService> {
+        LsmTreeService::builder()
+            .segments_path(self.test_path())
+            .build()
     }
 
     pub fn corrupt_wal(&self) -> Result<()> {
@@ -86,7 +88,7 @@ impl Test {
         sstable_path
     }
 
-    pub fn inject_data(storage: &mut Storage, amount: usize) -> Result<()> {
+    pub fn inject_data(storage: &mut LsmTreeService, amount: usize) -> Result<()> {
         let mut writer = storage.open_as_writer()?;
 
         for i in 0..amount {

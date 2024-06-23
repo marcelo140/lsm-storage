@@ -49,8 +49,8 @@ pub(crate) fn entry_size(entry: &(String, Stored)) -> Result<u64> {
     Ok(bincode::serialized_size(&entry)?)
 }
 
-pub(crate) fn entry_size_kv(key: &str, value: &Stored) -> Result<usize> {
-    Ok(bincode::serialized_size(&(key, value))? as usize)
+pub(crate) fn entry_size_kv(key: &str, value: &Stored) -> Result<u64> {
+    Ok(bincode::serialized_size(&(key, value))?)
 }
 
 fn reached_eof(error: &ErrorKind) -> bool {

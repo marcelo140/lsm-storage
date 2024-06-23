@@ -1,86 +1,71 @@
 use crate::format;
-use crate::Stored;
 use crate::sstable::SSTable;
+use crate::wal::WriteAheadLog;
+use crate::Stored;
 use anyhow::Result;
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// An in-memory data-structure that keeps entries ordered by key.
 ///
-/// It is hard to keep a mutable on-disk data structure ordered without losing performance. To
-/// overcome this, new entries are inserted into an in-memory table. Once the size of the table
-/// exceeds a certain threshold, it is persisted as a SSTable.
+/// It is hard to keep a mutable on-disk data structure ordered so new entries are inserted into an in-memory table.
+/// Once the size of the table exceeds a certain threshold, it is persisted as a SSTable.
 ///
 /// In order to recover from a crash without losing the in-memory data, every insertion should be
-/// inserted into a Write-Ahead Log. As such, insertions and removes can fail if they are unable
+/// inserted into a write-ahead log. As such, insertions and removes can fail if they are unable
 /// to persist to disk.
 ///
-/// In case of remove operations, the original key-pair may already be persisted in a persisted
-/// SSTable and thus cannot be simply removed. This is why we insert a Tombstone in remove
-/// operations.
+/// In case of remove operations, the original key-value pair may already be persisted in a persisted
+/// SSTable and thus cannot be simply removed. This is why we insert a Tombstone in remove operations.
 pub struct MemTable {
-    pub id: usize,
     pub(crate) tree: BTreeMap<String, Stored>,
-    wal_path: PathBuf,
-    wal: File,
+    wal: WriteAheadLog<(String, Stored)>,
 }
 
 impl MemTable {
-    /// Creates an empty MemTable.
-    pub fn new(id: usize, wal_path: &Path) -> Result<Self> {
-        let wal = MemTable::create_wal(id, wal_path)?;
-
+    /// Creates an empty MemTable and its write-ahead log.
+    pub fn new(wal_path: &Path) -> Result<Self> {
         Ok(MemTable {
-            id,
             tree: BTreeMap::new(),
-            wal_path: wal_path.to_path_buf(),
-            wal,
+            wal: WriteAheadLog::new(wal_path)?,
         })
     }
 
-    /// Creates a MemTable from a write-ahead-log
+    /// Creates a MemTable from a write-ahead log.
+    ///
+    /// Panics if the WAL has a corrupted header.
+    /// Truncates the WAL in the presence of corrupted values.
     pub fn recover(wal_path: &Path) -> Result<Self> {
-        let wal = MemTable::open_wal(wal_path)?;
-        let id = format::read_memtable_header(&wal)?.unwrap();
-
         let mut tree = BTreeMap::new();
-        let mut bytes_read = format::memtable_metadata_size(id)?;
 
-        while let Ok(Some(deserialized_value)) = format::read_entry(&wal) {
-            bytes_read += format::entry_size(&deserialized_value)?;
-            tree.insert(deserialized_value.0, deserialized_value.1);
-        }
+        let wal = WriteAheadLog::recover(wal_path, |(key, value)| {
+            tree.insert(key, value);
+        })?;
 
-        wal.set_len(bytes_read)?;
-
-        Ok(MemTable {
-            id,
-            tree,
-            wal_path: wal_path.to_path_buf(),
-            wal,
-        })
+        Ok(MemTable { tree, wal })
     }
 
     /// Inserts a new entry into the MemTable.
     /// The new entry is persisted into the WAL for recovery purposes.
     pub fn insert(&mut self, key: String, value: Vec<u8>) -> Result<()> {
         let value = Stored::Value(value);
+        let change = (key, value);
 
-        format::write_entry(&mut self.wal, &key, &value)?;
-        self.wal.flush()?;
-        self.tree.insert(key, value);
+        self.wal.append(&change)?;
+        self.tree.insert(change.0, change.1);
 
         Ok(())
     }
 
-    /// Removes an entry from the MemTable putting a tombstone in its place.
+    /// Removes an entry from the MemTable by appending a tombstone.
     /// The tombstone is persisted into the WAL for recovery purposes.
     pub fn remove(&mut self, key: String) -> Result<()> {
-        format::write_entry(&mut self.wal, &key, &Stored::Tombstone)?;
-        self.wal.flush()?;
-        self.tree.insert(key, Stored::Tombstone);
+        let change = (key, Stored::Tombstone);
+
+        self.wal.append(&change)?;
+        self.tree.insert(change.0, change.1);
 
         Ok(())
     }
@@ -91,7 +76,7 @@ impl MemTable {
     }
 
     /// Returns the value corresponding to the given key, if present.
-    pub fn get(&self, key: &str) -> Option<&[u8]> {
+    pub fn lookup(&self, key: &str) -> Option<&[u8]> {
         match self.tree.get(key) {
             Some(Stored::Value(v)) => Some(v),
             _ => None,
@@ -101,6 +86,7 @@ impl MemTable {
     /// Persists the MemTable to disk storing its entries in-order.
     ///
     /// Returns the corresponding SSTable.
+    /// TODO: remove SSTable dependency
     pub fn persist(&self, path: &Path) -> Result<SSTable> {
         let mut fd = File::create(path)?;
 
@@ -110,24 +96,13 @@ impl MemTable {
         }
         fd.flush()?;
 
-        std::fs::remove_file(self.wal_path.to_owned())?;
+        // std::fs::remove_file(self.wal_path.to_owned())?;
 
-        Ok(SSTable::new(path))
+        SSTable::new(path)
     }
 
-    fn create_wal(id: usize, path: &Path) -> Result<File> {
-        let mut f = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(path)?;
-
-        format::write_memtable_header(&mut f, id)?;
-        Ok(f)
-    }
-
-    fn open_wal(path: &Path) -> std::io::Result<File> {
-        OpenOptions::new().read(true).write(true).open(path)
+    fn iter(&self) -> std::collections::btree_map::Iter<String, Stored> {
+        self.tree.iter()
     }
 }
 
@@ -142,19 +117,19 @@ mod tests {
     use anyhow::Result;
 
     #[test]
-    fn get_should_see_inserted_entries() -> Result<()> {
+    fn lookup_finds_inserted_entries() -> Result<()> {
         let test = Test::new()?;
         let mut memtable = test.create_memtable()?;
 
         memtable.insert("key1".to_string(), "value1".as_bytes().to_owned())?;
 
-        assert_eq!(memtable.get("key2"), None);
-        assert_eq!(memtable.get("key1"), Some("value1".as_bytes()));
+        assert_eq!(memtable.lookup("key2"), None);
+        assert_eq!(memtable.lookup("key1"), Some("value1".as_bytes()));
         Ok(())
     }
 
     #[test]
-    fn get_should_not_see_deleted_entries() -> Result<()> {
+    fn lookup_should_not_find_removed_entries() -> Result<()> {
         let test = Test::new()?;
         let mut memtable = test.create_memtable()?;
 
@@ -162,13 +137,13 @@ mod tests {
         memtable.insert("key2".to_string(), "value2".as_bytes().to_owned())?;
         memtable.remove("key2".to_string())?;
 
-        assert_eq!(memtable.get("key1"), None);
-        assert_eq!(memtable.get("key2"), None);
+        assert_eq!(memtable.lookup("key1"), None);
+        assert_eq!(memtable.lookup("key2"), None);
         Ok(())
     }
 
     #[test]
-    fn recover_should_yield_the_same_memtable() -> Result<()> {
+    fn recover_yields_the_same_memtable() -> Result<()> {
         let test = Test::new()?;
         let mut memtable = test.create_memtable()?;
 
@@ -182,7 +157,8 @@ mod tests {
     }
 
     #[test]
-    fn recover_should_load_from_corrupted_wal() -> Result<()> {
+    // TODO: move to WAL tests
+    fn recover_loads_from_corrupted_wal() -> Result<()> {
         let test = Test::new()?;
         let mut memtable = test.create_memtable()?;
 
@@ -200,6 +176,7 @@ mod tests {
     }
 
     #[test]
+    // TODO: move to WAL tests
     fn recover_should_truncate_corrupted_log() -> Result<()> {
         let test = Test::new()?;
         let mut memtable = test.create_memtable()?;
@@ -223,6 +200,7 @@ mod tests {
     }
 
     #[test]
+    // TODO: move to SSTable
     fn persist_should_store_all_elements_in_order() -> Result<()> {
         let test = Test::new()?;
 
@@ -259,6 +237,7 @@ mod tests {
     }
 
     #[test]
+    // TODO: remove
     fn persisting_memtable_should_delete_wal() -> Result<()> {
         let test = Test::new()?;
 

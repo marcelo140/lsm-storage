@@ -7,31 +7,26 @@ use std::io::{Seek, SeekFrom};
 use std::path::Path;
 use std::path::PathBuf;
 
-/// A data structure that allows read-only access into an ordered set of <key, value> pairs persisted on-disk.
+/// A data structure that allows read-only access into an ordered set of key-value pairs persisted on disk.
 ///
 /// Upon initialization, all entries are read to build an index with the offset for each key. This
-/// allows for quick reads into the log by seeking directly into the correct offset.
+/// allows for quick reads into the log by seeking directly into the correct offset. Currently, all keys are required
+/// to fit in-memory.
 #[derive(PartialEq, Eq, Clone)]
 pub struct SSTable {
     path: PathBuf,
-}
-
-pub struct SSTableReader {
-    fd: File,
     indexes: HashMap<String, u64>,
 }
 
 impl SSTable {
     /// Initializes a SSTable for the provided path and scans the log to build the in-memory index.
-    pub fn new(path: &Path) -> Self {
-        SSTable { path: path.to_path_buf() }
-    }
+    pub fn new(path: &Path) -> Result<Self> {
+        let fd = File::open(path)?;
 
-    pub fn reader(&self) -> Result<SSTableReader> {
-        let fd = File::open(&self.path)?;
-        let indexes = SSTable::build_index_table(&fd)?;
-
-        Ok(SSTableReader { fd, indexes })
+        Ok(SSTable {
+            path: path.to_path_buf(),
+            indexes: SSTable::build_index_table(&fd)?,
+        })
     }
 
     fn build_index_table(fd: &File) -> Result<HashMap<String, u64>> {
@@ -48,18 +43,36 @@ impl SSTable {
         Ok(indexes)
     }
 
+    pub fn lookup(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let value_position = match self.indexes.get(key) {
+            Some(&value) => value,
+            None => return Ok(None),
+        };
+
+        let mut fd = File::open(&self.path)?;
+        fd.seek(SeekFrom::Start(value_position))?;
+        let (_key, value) = format::read_entry(&fd)?.expect("file was corrupted after loading");
+
+        match value {
+            Stored::Value(v) => Ok(Some(v)),
+            Stored::Tombstone => Ok(None),
+        }
+    }
+
     pub(crate) fn merge(
         path: PathBuf,
-        old_sstable: &mut SSTableReader,
-        new_sstable: &mut SSTableReader,
+        old_sstable: &SSTable,
+        new_sstable: &SSTable,
     ) -> Result<SSTable> {
-        old_sstable.fd.rewind()?;
-        new_sstable.fd.rewind()?;
+        let old_sstable_fd = File::open(&old_sstable.path)?;
+        let new_sstable_fd = File::open(&new_sstable.path)?;
 
-        let mut old_entry = format::read_entry(&old_sstable.fd)?;
-        let mut new_entry = format::read_entry(&new_sstable.fd)?;
-        
+        let mut old_entry = format::read_entry(&old_sstable_fd)?;
+        let mut new_entry = format::read_entry(&new_sstable_fd)?;
+
         let mut fd = File::create(&path)?;
+        let mut indexes = HashMap::new();
+        let mut bytes_read = 0u64;
 
         while let Some(((old_key, old_value), (new_key, new_value))) =
             old_entry.as_ref().zip(new_entry.as_ref())
@@ -67,51 +80,51 @@ impl SSTable {
             match old_key.cmp(new_key) {
                 std::cmp::Ordering::Equal => {
                     format::write_entry(&mut fd, new_key, new_value)?;
-                    old_entry = format::read_entry(&old_sstable.fd)?;
-                    new_entry = format::read_entry(&new_sstable.fd)?;
+                    let kv_size = format::entry_size_kv(new_key, new_value)?;
+                    indexes.insert(new_key.clone(), bytes_read);
+
+                    bytes_read += kv_size;
+                    old_entry = format::read_entry(&old_sstable_fd)?;
+                    new_entry = format::read_entry(&new_sstable_fd)?;
                 }
                 std::cmp::Ordering::Less => {
                     format::write_entry(&mut fd, old_key, old_value)?;
-                    old_entry = format::read_entry(&old_sstable.fd)?;
+                    let kv_size = format::entry_size_kv(old_key, old_value)?;
+                    indexes.insert(old_key.clone(), bytes_read);
+
+                    bytes_read += kv_size;
+                    old_entry = format::read_entry(&old_sstable_fd)?;
                 }
                 std::cmp::Ordering::Greater => {
                     format::write_entry(&mut fd, new_key, new_value)?;
-                    new_entry = format::read_entry(&new_sstable.fd)?;
+                    let kv_size = format::entry_size_kv(new_key, new_value)?;
+                    indexes.insert(new_key.clone(), bytes_read);
+
+                    bytes_read += kv_size;
+                    new_entry = format::read_entry(&new_sstable_fd)?;
                 }
             }
         }
 
         while let Some((old_key, old_value)) = old_entry {
             format::write_entry(&mut fd, &old_key, &old_value)?;
-            old_entry = format::read_entry(&old_sstable.fd)?;
+            let kv_size = format::entry_size_kv(&old_key, &old_value)?;
+            indexes.insert(old_key, bytes_read);
+
+            bytes_read += kv_size;
+            old_entry = format::read_entry(&old_sstable_fd)?;
         }
 
         while let Some((new_key, new_value)) = new_entry {
             format::write_entry(&mut fd, &new_key, &new_value)?;
-            new_entry = format::read_entry(&new_sstable.fd)?;
+            let kv_size = format::entry_size_kv(&new_key, &new_value)?;
+            indexes.insert(new_key, bytes_read);
+
+            bytes_read += kv_size;
+            new_entry = format::read_entry(&new_sstable_fd)?;
         }
 
-        Ok(SSTable { path })
-    }
-}
-
-impl SSTableReader {
-    /// Returns the value for the provided key if it is stored in the SSTable.
-    pub fn get(&mut self, key: &str) -> Result<Option<Vec<u8>>> {
-        // TODO: this shouldn't need to be mutable
-        let value_position = &self.indexes.get(key);
-
-        if value_position.is_none() {
-            return Ok(None);
-        }
-
-        self.fd.seek(SeekFrom::Start(*value_position.unwrap()))?;
-        let (_key, value) = format::read_entry(&self.fd)?.unwrap();
-
-        match value {
-            Stored::Value(v) => Ok(Some(v)),
-            Stored::Tombstone => Ok(None),
-        }
+        Ok(SSTable { path, indexes })
     }
 }
 
@@ -144,21 +157,22 @@ mod tests {
 
         assert_eq!(contents.len(), 3);
 
-        sstable_reader.fd.seek(SeekFrom::Start(*index1))?;
+        let mut fd = File::open(&sstable_reader.path)?;
+        fd.seek(SeekFrom::Start(*index1))?;
         assert_eq!(
-            format::read_entry(&sstable_reader.fd)?.unwrap(),
+            format::read_entry(&fd)?.unwrap(),
             ("key-1".to_owned(), Stored::Value(b"value-1".to_vec()))
         );
 
-        sstable_reader.fd.seek(SeekFrom::Start(*index2))?;
+        fd.seek(SeekFrom::Start(*index2))?;
         assert_eq!(
-            format::read_entry(&sstable_reader.fd)?.unwrap(),
+            format::read_entry(&fd)?.unwrap(),
             ("key-2".to_owned(), Stored::Value(b"value-2".to_vec()))
         );
 
-        sstable_reader.fd.seek(SeekFrom::Start(*index3))?;
+        fd.seek(SeekFrom::Start(*index3))?;
         assert_eq!(
-            format::read_entry(&sstable_reader.fd)?.unwrap(),
+            format::read_entry(&fd)?.unwrap(),
             ("key-3".to_owned(), Stored::Value(b"value-3".to_vec()))
         );
 
@@ -179,7 +193,7 @@ mod tests {
         )?;
         let mut sstable_reader = sstable.reader()?;
 
-        let value = sstable_reader.get("key-1")?;
+        let value = sstable_reader.lookup("key-1")?;
         assert!(value.is_some());
 
         let deserialized_value = String::from_utf8(value.unwrap())?;
@@ -212,7 +226,11 @@ mod tests {
         )?;
 
         let sstable_path = test.sstable_path("merged-table");
-        SSTable::merge(sstable_path.clone(), &mut old_sstable.reader()?, &mut new_sstable.reader()?)?;
+        SSTable::merge(
+            sstable_path.clone(),
+            &mut old_sstable.reader()?,
+            &mut new_sstable.reader()?,
+        )?;
 
         let fd = File::open(sstable_path)?;
 
